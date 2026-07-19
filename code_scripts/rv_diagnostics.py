@@ -10,7 +10,8 @@ from astropy.io import fits
 
 from absorption_flexure import evaluate_telluric_flexure_curve, telluric_good_pixel_mask
 from rv_helpers import (
-    _float_array, _read_channel, convert_air_to_vacuum, degrade_spectrum_resolution, doppler_shift, estimate_normalized_flux_error, medfilt_fixed_window_AA,
+    _float_array, _read_channel, convert_air_to_vacuum, degrade_spectrum_resolution, doppler_shift, estimate_model_continuum_flux_error,
+    estimate_normalized_flux_error, medfilt_fixed_window_AA,
     load_emission_line_catalog, read_reduced_2d_spectrum, read_sky_model_at_trace, telluric_model_for_airmass,
 )
 from wavelength_dependent_rvs import _stellar_wavelengths_for_rv
@@ -243,15 +244,24 @@ def chunk_chi2_curve(
         telluric_grid_path=rv_result.telluric_grid_path, spectral_resolution=rv_result.spectral_resolution, telluric_model_resolution=telluric_resolution,
     )
     fit_mask &= (obs_wl > low) & (obs_wl < high) & np.isfinite(norm_flux) & (norm_flux > 0.05) & (norm_flux < 2.0)
-    flux_error = estimate_normalized_flux_error(obs_wl, obs_flux, mask=fit_mask, continuum_lims=(low, high), continuum_window_AA=continuum_window_AA)
-    norm_err = np.full_like(norm_flux, flux_error, dtype=float)
-
     chi2 = np.full_like(rv_grid, np.nan, dtype=float)
     if np.sum(fit_mask) < 20:
         return rv_grid, chi2
     temp_mask = (rv_temp_wl > np.nanmin(rv_wl[fit_mask]) - 10) & (rv_temp_wl < np.nanmax(rv_wl[fit_mask]) + 10)
     if np.sum(temp_mask) < 5:
         return rv_grid, chi2
+
+    flux_error = float(chunk.get("Flux Error", np.nan))
+    if not np.isfinite(flux_error) or flux_error <= 0:
+        stellar_shift = center_rv - rv_result.barycentric_correction + flex_corr
+        shifted_template = doppler_shift(rv_temp_wl[temp_mask], temp_flux[temp_mask], stellar_shift)
+        best_model = np.interp(rv_wl, rv_temp_wl[temp_mask], shifted_template, left=1, right=1)
+        flux_error = estimate_model_continuum_flux_error(norm_flux, best_model, mask=fit_mask)
+    if not np.isfinite(flux_error) or flux_error <= 0:
+        flux_error = estimate_normalized_flux_error(
+            obs_wl, obs_flux, mask=fit_mask, continuum_lims=(low, high), continuum_window_AA=continuum_window_AA,
+        )
+    norm_err = np.full_like(norm_flux, flux_error, dtype=float)
 
     for i, corrected_rv in enumerate(rv_grid):
         stellar_shift = corrected_rv - rv_result.barycentric_correction + flex_corr

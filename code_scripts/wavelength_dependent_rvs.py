@@ -14,7 +14,8 @@ from emission_flexure import derive_sky_emission_flexure_curve, fit_sky_emission
 from rv_helpers import (
     DEFAULT_BOSZ_GRID, DEFAULT_BOSZ_WAVELENGTHS, DEFAULT_EMISSION_LINE_DIR, DEFAULT_TELLURIC_GRID, DEFAULT_TELLURIC_GRID_DIR, DEFAULT_TEMPLATE_RESOLUTION,
     DEFAULT_TELLURIC_MODEL_RESOLUTION, NGPS_CHANNEL_RANGES, _float_array, _header_float, _read_airmass, _read_channel, _read_coordinate_degrees,
-    _read_observation_time, barycentric_correction, convert_air_to_vacuum, degrade_spectrum_resolution, doppler_shift, estimate_normalized_flux_error,
+    _read_observation_time, barycentric_correction, convert_air_to_vacuum, degrade_spectrum_resolution, doppler_shift, estimate_model_continuum_flux_error,
+    estimate_normalized_flux_error,
     load_bosz_wavelengths, measure_resolution, medfilt_fixed_window_AA, read_reduced_2d_spectrum, retrieve_bosz_spectrum, select_telluric_grid_path,
     set_data_dir, template_from_inputs, _resolve_path,
 )
@@ -168,6 +169,9 @@ def radial_velocity_masked(
         "RV Grid Edge Distance": np.nan,
         "Coarse Best RV": np.nan,
         "Residual Spike Fraction": np.nan,
+        "Continuum Noise Pixels": 0,
+        "Adaptive Model Continuum": False,
+        "Flux Error Method": "user supplied" if obs_fluxerr is not None else "normalized scatter fallback",
     }
 
     def finish(rv, rv_err):
@@ -222,14 +226,6 @@ def radial_velocity_masked(
         return finish(np.nan, np.nan)
     coarse_best_idx = int(np.nanargmin(chi2s))
     best_rv = shifts[coarse_best_idx]
-    coarse_min = float(chi2s[coarse_best_idx])
-    quality["Coarse Best RV"] = float(best_rv)
-    quality["Coarse Chi2 Edge Delta"] = float(np.nanmin([chi2s[0], chi2s[-1]]) - coarse_min)
-    quality["RV Grid Edge Distance"] = float(min(best_rv - shifts[0], shifts[-1] - best_rv))
-    separated = np.abs(shifts - best_rv) >= 20
-    if np.any(separated & np.isfinite(chi2s)):
-        quality["Second Minimum Delta Chi2"] = float(np.nanmin(chi2s[separated]) - coarse_min)
-
     fine_shifts = np.arange(best_rv - fine_half_width, best_rv + fine_half_width, fine_step)
     fine_chi2s = []
     for shift in fine_shifts:
@@ -241,9 +237,33 @@ def radial_velocity_masked(
         return finish(np.nan, np.nan)
     fine_best_idx = int(np.nanargmin(fine_chi2s))
     best_rv = fine_shifts[fine_best_idx]
-    fine_min = float(fine_chi2s[fine_best_idx])
     shifted_template = doppler_shift(temp_wavl[temp_mask], temp_flux[temp_mask], best_rv)
     model = np.interp(obs_wavl, temp_wavl[temp_mask], shifted_template, left=1, right=1)
+
+    if obs_fluxerr is None:
+        model_flux_error, n_continuum, adaptive_continuum, _ = estimate_model_continuum_flux_error(
+            norm_flux, model, mask=m, return_details=True,
+        )
+        if np.isfinite(model_flux_error) and model_flux_error > 0:
+            chi2_scale = (float(flux_error) / float(model_flux_error)) ** 2
+            chi2s *= chi2_scale
+            fine_chi2s *= chi2_scale
+            flux_error = float(model_flux_error)
+            norm_err = np.full_like(norm_flux, flux_error, dtype=float)
+            quality["Flux Error"] = flux_error
+            quality["Continuum Noise Pixels"] = int(n_continuum)
+            quality["Adaptive Model Continuum"] = bool(adaptive_continuum)
+            quality["Flux Error Method"] = "model continuum residuals"
+
+    coarse_min = float(chi2s[coarse_best_idx])
+    quality["Coarse Best RV"] = float(shifts[coarse_best_idx])
+    quality["Coarse Chi2 Edge Delta"] = float(np.nanmin([chi2s[0], chi2s[-1]]) - coarse_min)
+    quality["RV Grid Edge Distance"] = float(min(shifts[coarse_best_idx] - shifts[0], shifts[-1] - shifts[coarse_best_idx]))
+    separated = np.abs(shifts - shifts[coarse_best_idx]) >= 20
+    if np.any(separated & np.isfinite(chi2s)):
+        quality["Second Minimum Delta Chi2"] = float(np.nanmin(chi2s[separated]) - coarse_min)
+
+    fine_min = float(fine_chi2s[fine_best_idx])
     spike_threshold = float(residual_spike_abs_threshold)
     if np.isfinite(spike_threshold) and spike_threshold > 0 and np.any(spike_mask):
         quality["Residual Spike Fraction"] = float(np.mean(np.abs((norm_flux - model)[spike_mask]) > spike_threshold))

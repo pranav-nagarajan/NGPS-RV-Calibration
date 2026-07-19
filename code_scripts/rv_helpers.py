@@ -921,6 +921,62 @@ def estimate_normalized_flux_error(
     return (flux_error, snr) if return_snr else flux_error
 
 
+def estimate_model_continuum_flux_error(
+    normalized_flux, model_flux, mask=None, model_continuum_min=0.98, model_continuum_max=1.02, adaptive_fraction=0.30,
+    sigma_clip=4, clip_iterations=4, min_pixels=20, error_floor=1e-4, return_details=False,
+):
+    """Estimate flux error from pixels identified as continuum by the fitted model.
+
+    The preferred pixels have stellar-model flux within two percent of unity.
+    For line-rich chunks with too few such pixels, the least-absorbed fraction
+    of valid pixels is selected by the model alone. The observed flux therefore
+    does not determine which side of the noise distribution is retained.
+    """
+    normalized_flux = _float_array(normalized_flux)
+    model_flux = _float_array(model_flux)
+    if len(normalized_flux) != len(model_flux):
+        raise ValueError("normalized_flux and model_flux must have the same length")
+
+    valid = np.isfinite(normalized_flux) & np.isfinite(model_flux)
+    if mask is not None:
+        valid &= np.asarray(mask, dtype=bool)
+
+    continuum_mask = valid & (model_flux >= float(model_continuum_min)) & (model_flux <= float(model_continuum_max))
+    adaptive = False
+    if np.sum(continuum_mask) < min_pixels:
+        eligible = np.flatnonzero(valid)
+        if len(eligible) >= min_pixels:
+            n_select = min(len(eligible), max(int(min_pixels), int(np.ceil(float(adaptive_fraction) * len(eligible)))))
+            ranked = eligible[np.argsort(model_flux[eligible])]
+            continuum_mask = np.zeros_like(valid, dtype=bool)
+            continuum_mask[ranked[-n_select:]] = True
+            adaptive = True
+
+    residuals = normalized_flux[continuum_mask] - model_flux[continuum_mask]
+    residuals = residuals[np.isfinite(residuals)]
+    for _ in range(int(clip_iterations)):
+        if len(residuals) < min_pixels or sigma_clip is None:
+            break
+        center = np.nanmedian(residuals)
+        scatter = np.nanstd(residuals, ddof=1) if len(residuals) > 1 else np.nan
+        if not np.isfinite(scatter) or scatter <= 0:
+            break
+        keep = np.abs(residuals - center) < float(sigma_clip) * scatter
+        if np.all(keep):
+            break
+        residuals = residuals[keep]
+
+    flux_error = np.nanstd(residuals, ddof=1) if len(residuals) > 1 else np.nan
+    if np.isfinite(flux_error) and flux_error > 0:
+        flux_error = max(float(flux_error), float(error_floor))
+    else:
+        flux_error = np.nan
+
+    if return_details:
+        return flux_error, int(len(residuals)), bool(adaptive), continuum_mask
+    return flux_error
+
+
 def doppler_shift(wavelength, flux, dv):
     """Evaluate ``flux`` at wavelengths Doppler shifted by ``dv`` km/s."""
     wavelength = _float_array(wavelength)
