@@ -252,10 +252,10 @@ SKY_CHANNEL_WINDOWS = {
     "I": (7545, 10400),
 }
 SKY_Y_LIMITS = {
-    "U": (-5, 100),
-    "G": (-15, 250),
-    "R": (-25, 240),
-    "I": (-100, 1550),
+    "U": (-25, 500),
+    "G": (-75, 1250),
+    "R": (-125, 1200),
+    "I": (-500, 7750),
 }
 
 
@@ -322,7 +322,7 @@ def plot_sky_emission_spectra_ugri(
         ax.set_ylim(*SKY_Y_LIMITS[channel])
         ax.set_title(f"{channel} channel extracted 1D sky spectrum")
         ax.set_xlabel("Wavelength [A]")
-        ax.set_ylabel("Sky - continuum")
+        ax.set_ylabel("Sky - continuum\n(arbitrary units)")
     return fig, axes
 
 

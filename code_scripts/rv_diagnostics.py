@@ -418,7 +418,7 @@ def plot_emission_line_fits(
             fontsize=10,
             bbox={"facecolor": "white", "edgecolor": "none", "alpha": 0.85, "pad": 2.0},
         )
-        ax.set_ylabel("Sky flux")
+        ax.set_ylabel("Sky flux\n(arbitrary units)")
         ax.legend(loc="best", fontsize=8)
     axes[min(len(line_wavelengths), len(axes)) - 1].set_xlabel("Wavelength [A]")
     return fig, axes

@@ -47,6 +47,46 @@ def _gaussian_plus_line(params, wavelength):
     return amp * np.exp(-0.5 * (x / sigma) ** 2) + c0 + c1 * x
 
 
+def _sigma_clip_flexure_anchors(curve, good, sigma_clip, channel, residual_floor=3):
+    """Reject isolated flexure anchors without clipping a real I-band trend."""
+    if sigma_clip is None or np.sum(good) < 3:
+        return good
+
+    values = curve["Flexure Correction"].values.astype(float)
+    channel = str(channel).upper() if channel is not None else ""
+
+    # The I-band emission curve is commonly U-shaped across its broad
+    # wavelength range. Clipping about a single median can therefore reject a
+    # precise edge anchor merely because it provides real wavelength leverage.
+    if channel == "I" and np.sum(good) >= 5:
+        wavelength = curve["Wavelength"].values.astype(float)
+        center = np.nanmedian(wavelength[good])
+        scale_x = 0.5 * np.ptp(wavelength[good])
+        if np.isfinite(scale_x) and scale_x > 0:
+            x = (wavelength - center) / scale_x
+            degree = min(2, np.sum(good) - 2)
+            initial = np.polyfit(x[good], values[good], degree)
+            initial_residual = values[good] - np.polyval(initial, x[good])
+            scale = 1.4826 * np.nanmedian(np.abs(initial_residual - np.nanmedian(initial_residual)))
+            scale = max(scale, residual_floor)
+            robust = least_squares(
+                lambda coeff: (np.polyval(coeff, x[good]) - values[good]) / scale,
+                initial,
+                loss="soft_l1",
+                f_scale=1,
+            )
+            residual = values - np.polyval(robust.x, x)
+            center_residual = np.nanmedian(residual[good])
+            scatter = 1.4826 * np.nanmedian(np.abs(residual[good] - center_residual))
+            scatter = max(scatter, residual_floor)
+            return good & (np.abs(residual - center_residual) < sigma_clip * scatter)
+
+    median = np.nanmedian(values[good])
+    scatter = 1.4826 * np.nanmedian(np.abs(values[good] - median))
+    scatter = max(scatter, residual_floor)
+    return good & (np.abs(values - median) < sigma_clip * scatter)
+
+
 def fit_sky_emission_line(wavelength, sky_flux, rest_wavelength, window_size=5, min_pixels=5):
     """Fit one sky-emission line with a Gaussian plus linear continuum."""
     wavelength = _float_array(wavelength)
@@ -151,13 +191,7 @@ def derive_sky_emission_flexure_curve(
         err = curve["Flexure Correction Error"].values.astype(float)
         good &= (~np.isfinite(err)) | (err < max_flexure_error)
 
-    if np.sum(good) >= 3 and curve_sigma_clip is not None:
-        vals = curve.loc[good, "Flexure Correction"].values.astype(float)
-        med = np.nanmedian(vals)
-        scatter = 1.4826 * np.nanmedian(np.abs(vals - med))
-        scatter = max(scatter, 3)
-        good_indices = curve.index[good]
-        good[good_indices] = np.abs(vals - med) < curve_sigma_clip * scatter
+    good = _sigma_clip_flexure_anchors(curve, good, curve_sigma_clip, channel)
 
     curve["Good"] = good
     fallback = np.nanmedian(curve.loc[curve["Good"], "Flexure Correction"]) if np.any(curve["Good"]) else np.nan

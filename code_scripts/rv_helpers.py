@@ -269,8 +269,10 @@ def read_reduced_2d_spectrum(fits_file, trace_column=None, aperture_half_width=2
     return wavelength, flux, header
 
 
-def read_sky_model_at_trace(fits_file, trace_column=None, trace_y=None, sky_hdu=2, wavelength_hdu=3):
-    """Return the sky model at the source trace pixel."""
+def read_sky_model_at_trace(
+    fits_file, trace_column=None, trace_y=None, sky_hdu=2, wavelength_hdu=3, aperture_half_width=2,
+):
+    """Extract the sky model through the same boxcar aperture as the science spectrum."""
     with fits.open(_resolve_path(fits_file, base_dir=Path.cwd())) as hdul:
         header = hdul[0].header.copy()
         science = _float_array(hdul[1].data)
@@ -285,8 +287,12 @@ def read_sky_model_at_trace(fits_file, trace_column=None, trace_y=None, sky_hdu=
         trace_y = _trace_position(sky_subtracted, trace_column)
     trace_y = int(np.clip(trace_y, 0, sky_subtracted.shape[0] - 1))
 
-    wavelength = _wavelength_1d(wavelength_data, sky_subtracted.shape, trace_y, trace_y + 1, trace_y)
-    return wavelength, sky[trace_y, :], header, trace_y
+    half_width = max(1, int(aperture_half_width))
+    y0 = max(0, trace_y - half_width)
+    y1 = min(sky.shape[0], trace_y + half_width + 1)
+    wavelength = _wavelength_1d(wavelength_data, sky_subtracted.shape, y0, y1, trace_y)
+    sky_flux = np.nansum(sky[y0:y1, :], axis=0)
+    return wavelength, sky_flux, header, trace_y
 
 
 def _candidate_emission_line_dirs(emission_line_dir=DEFAULT_EMISSION_LINE_DIR):
