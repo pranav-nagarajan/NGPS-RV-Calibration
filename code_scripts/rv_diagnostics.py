@@ -10,7 +10,8 @@ from astropy.io import fits
 
 from absorption_flexure import evaluate_telluric_flexure_curve, telluric_good_pixel_mask
 from rv_helpers import (
-    _float_array, _read_channel, convert_air_to_vacuum, degrade_spectrum_resolution, doppler_shift, estimate_model_continuum_flux_error,
+    _float_array, _read_channel, convert_air_to_vacuum, convert_vacuum_to_air, degrade_spectrum_resolution, doppler_shift,
+    estimate_model_continuum_flux_error,
     estimate_normalized_flux_error, medfilt_fixed_window_AA,
     load_emission_line_catalog, read_reduced_2d_spectrum, read_sky_model_at_trace, telluric_model_for_airmass,
 )
@@ -26,7 +27,7 @@ def _relaxed_blue_anchor_mask(curve, good, *, blue_anchor_wavelength_max=6563, s
         return good & curve["Relaxed Blue Anchor"].fillna(False).astype(bool).values
     if not {"Wavelength", "Telluric Depth"}.issubset(curve.columns):
         return np.zeros(len(curve), dtype=bool)
-    wavelength = curve["Wavelength"].values.astype(float)
+    wavelength = convert_vacuum_to_air(curve["Wavelength"].values.astype(float))
     depth = curve["Telluric Depth"].values.astype(float)
     return good & np.isfinite(wavelength) & (wavelength < blue_anchor_wavelength_max) & np.isfinite(depth) & (depth < standard_depth)
 
@@ -34,7 +35,7 @@ def _relaxed_blue_anchor_mask(curve, good, *, blue_anchor_wavelength_max=6563, s
 def _weak_blue_candidate_mask(curve, *, blue_anchor_wavelength_max=6563, min_blue_depth=0.02, standard_depth=0.08):
     if not {"Wavelength", "Telluric Depth"}.issubset(curve.columns):
         return np.zeros(len(curve), dtype=bool)
-    wavelength = curve["Wavelength"].values.astype(float)
+    wavelength = convert_vacuum_to_air(curve["Wavelength"].values.astype(float))
     depth = curve["Telluric Depth"].values.astype(float)
     candidate = np.isfinite(wavelength) & (wavelength < blue_anchor_wavelength_max)
     candidate &= np.isfinite(depth) & (depth >= min_blue_depth) & (depth < standard_depth)
@@ -282,6 +283,7 @@ def plot_flexure_curve(
     curve = _curve_from_result(rv_result_or_curve)
     if ax is None:
         _, ax = plt.subplots(figsize=(7, 4))
+    curve_wavelength_air = convert_vacuum_to_air(curve["Wavelength"].values.astype(float))
 
     if simple:
         show_bad = False
@@ -302,17 +304,17 @@ def plot_flexure_curve(
     if show_blue_candidates:
         rejected &= ~rejected_blue_candidate
     if show_bad and np.any(rejected):
-        ax.scatter(curve.loc[rejected, "Wavelength"], curve.loc[rejected, "Flexure Correction"], color="0.75", s=18, label="Rejected")
+        ax.scatter(curve_wavelength_air[rejected], curve.loc[rejected, "Flexure Correction"], color="0.75", s=18, label="Rejected")
     if show_bad and show_blue_candidates and np.any(rejected_blue_candidate):
         ax.scatter(
-            curve.loc[rejected_blue_candidate, "Wavelength"], curve.loc[rejected_blue_candidate, "Flexure Correction"], facecolors="none",
+            curve_wavelength_air[rejected_blue_candidate], curve.loc[rejected_blue_candidate, "Flexure Correction"], facecolors="none",
             edgecolors="tab:green", marker="D", s=30, label="Rejected blue candidate",
         )
     if np.any(standard_good):
-        ax.scatter(curve.loc[standard_good, "Wavelength"], curve.loc[standard_good, "Flexure Correction"], color="tab:blue", s=24, label="Anchors")
+        ax.scatter(curve_wavelength_air[standard_good], curve.loc[standard_good, "Flexure Correction"], color="tab:blue", s=24, label="Anchors")
     if not simple and np.any(relaxed_blue):
         ax.scatter(
-            curve.loc[relaxed_blue, "Wavelength"], curve.loc[relaxed_blue, "Flexure Correction"], color="tab:green", marker="D", s=30,
+            curve_wavelength_air[relaxed_blue], curve.loc[relaxed_blue, "Flexure Correction"], color="tab:green", marker="D", s=30,
             label="Relaxed blue anchor",
         )
     good_min = np.nanmin(curve.loc[good, "Wavelength"]) if np.any(good) else np.nan
@@ -320,12 +322,13 @@ def plot_flexure_curve(
     if show_evaluated and np.sum(good) >= 2:
         x = np.linspace(good_min, good_max, 300)
         y = evaluate_telluric_flexure_curve(x, curve, fallback_flexure=np.nan, poly_degree=poly_degree)
-        ax.plot(x, y, color="black", linewidth=1.5, label="Flexure curve")
+        ax.plot(convert_vacuum_to_air(x), y, color="black", linewidth=1.5, label="Flexure curve")
     if chunk_table is None and hasattr(rv_result_or_curve, "chunk_rvs"):
         chunk_table = rv_result_or_curve.chunk_rvs
     if chunk_table is not None and len(chunk_table):
-        chunk_wavelength = convert_air_to_vacuum(chunk_table["Wavelength Mid"].values.astype(float))
-        ax.scatter(chunk_wavelength, chunk_table["Flexure Correction"], marker="x", color="tab:orange", label="RV chunks")
+        chunk_wavelength_air = chunk_table["Wavelength Mid"].values.astype(float)
+        chunk_wavelength = convert_air_to_vacuum(chunk_wavelength_air)
+        ax.scatter(chunk_wavelength_air, chunk_table["Flexure Correction"], marker="x", color="tab:orange", label="RV chunks")
         if show_chunk_evaluation and np.sum(good) >= 1:
             chunk_min = np.nanmin(chunk_wavelength)
             chunk_max = np.nanmax(chunk_wavelength)
@@ -333,28 +336,27 @@ def plot_flexure_curve(
             y = evaluate_telluric_flexure_curve(x, curve, fallback_flexure=np.nan, poly_degree=poly_degree)
             inside = (x >= good_min) & (x <= good_max)
             if np.any(inside):
-                ax.plot(x[inside], y[inside], color="tab:orange", linewidth=1.2, alpha=0.8, label="Chunk-range evaluation")
+                ax.plot(
+                    convert_vacuum_to_air(x[inside]), y[inside], color="tab:orange", linewidth=1.2, alpha=0.8,
+                    label="Chunk-range evaluation",
+                )
             if np.any(~inside):
-                ax.plot(x[~inside], y[~inside], color="tab:orange", linewidth=1.2, linestyle="--", alpha=0.8, label="Extrapolated/clamped evaluation")
+                ax.plot(
+                    convert_vacuum_to_air(x[~inside]), y[~inside], color="tab:orange", linewidth=1.2, linestyle="--", alpha=0.8,
+                    label="Extrapolated/clamped evaluation",
+                )
 
     x_values = []
     if len(curve) and "Wavelength" in curve:
-        x_values.extend(curve["Wavelength"].values.astype(float))
+        x_values.extend(curve_wavelength_air)
     if chunk_table is not None and len(chunk_table) and "Wavelength Mid" in chunk_table:
-        x_values.extend(convert_air_to_vacuum(chunk_table["Wavelength Mid"].values.astype(float)))
+        x_values.extend(chunk_table["Wavelength Mid"].values.astype(float))
     x_values = np.asarray(x_values, dtype=float)
     finite_x = x_values[np.isfinite(x_values)]
     if show_halpha and len(finite_x) and np.nanmin(finite_x) < blue_anchor_wavelength_max < np.nanmax(finite_x):
         ax.axvline(blue_anchor_wavelength_max, color="0.45", linestyle=":", linewidth=1, label="H-alpha")
 
-    flexure_source = getattr(rv_result_or_curve, "flexure_source", "")
-    if not flexure_source and hasattr(curve, "attrs"):
-        flexure_source = curve.attrs.get("Flexure Source", "")
-    if str(flexure_source).lower() in {"sky_emission", "sky", "emission"}:
-        wavelength_label = r"Sky-line catalog wavelength (vacuum) [$\mathrm{\AA}$]"
-    else:
-        wavelength_label = r"Telluric-window center (vacuum) [$\mathrm{\AA}$]"
-    ax.set_xlabel(wavelength_label)
+    ax.set_xlabel(r"Observed-frame air wavelength [$\mathrm{\AA}$]")
     ax.set_ylabel("Flexure correction [km/s]")
     ax.legend()
     return ax

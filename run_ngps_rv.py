@@ -44,7 +44,7 @@ if str(CODE_DIR) not in sys.path:
     sys.path.insert(0, str(CODE_DIR))
 
 from rv_diagnostics import plot_chunk_chi2_curves, plot_chunk_model_overlays, plot_emission_line_fits, plot_flexure_curve
-from rv_helpers import read_reduced_2d_spectrum
+from rv_helpers import convert_vacuum_to_air, read_reduced_2d_spectrum
 from wavelength_dependent_rvs import DEFAULT_BOSZ_WAVELENGTHS, load_example_template, measure_ngps_rv
 
 
@@ -145,7 +145,19 @@ def public_flexure_table(result):
         "Flexure Correction",
         "Flexure Correction Error",
     ]
-    return table[[col for col in columns if col in table.columns]].rename(columns={wavelength_column: "Wavelength"})
+    output = table[[col for col in columns if col in table.columns]].copy()
+    if wavelength_column == "Wavelength":
+        output[wavelength_column] = convert_vacuum_to_air(output[wavelength_column].values.astype(float))
+    for column in ("Window Min", "Window Max"):
+        if column in output:
+            output[column] = convert_vacuum_to_air(output[column].values.astype(float))
+    return output.rename(
+        columns={
+            wavelength_column: "Observed-frame air wavelength [Å]",
+            "Window Min": "Window min (observed-frame air) [Å]",
+            "Window Max": "Window max (observed-frame air) [Å]",
+        }
+    )
 
 
 def public_flexure_source_name(source):
@@ -169,7 +181,13 @@ def public_rv_chunk_table(result):
         "Reduced Chi2",
         "Use in Combined RV",
     ]
-    return result.chunk_rvs[[col for col in columns if col in result.chunk_rvs.columns]]
+    return result.chunk_rvs[[col for col in columns if col in result.chunk_rvs.columns]].rename(
+        columns={
+            "Wavelength Min": "Observed-frame air wavelength min [Å]",
+            "Wavelength Max": "Observed-frame air wavelength max [Å]",
+            "Wavelength Mid": "Observed-frame air wavelength midpoint [Å]",
+        }
+    )
 
 
 def main():

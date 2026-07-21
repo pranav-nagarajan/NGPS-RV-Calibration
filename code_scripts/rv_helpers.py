@@ -833,6 +833,14 @@ def convert_air_to_vacuum(wave_air):
     return wave_vac
 
 
+def convert_vacuum_to_air(wave_vac):
+    """Vacuum-to-air wavelength conversion, valid above 2000 Angstrom."""
+    wave_vac = np.asarray(wave_vac, dtype=float)
+    sigma2 = (1e4 / wave_vac) ** 2
+    factor = 1.0 + 0.05792105 / (238.0185 - sigma2) + 0.00167917 / (57.362 - sigma2)
+    return wave_vac / factor
+
+
 def medfilt_fixed_window_AA(wl, flux, window_AA=301):
     """Continuum estimate using a median filter on a 1 Angstrom grid."""
     wl = _float_array(wl)
