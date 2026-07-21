@@ -125,7 +125,7 @@ def plot_reduced_1d_spectrum(
     title_channel = _read_channel(header, path, wavelength=wavelength, default=channel or "")
     title_slit = header.get("SLITW", slit_width)
     ax.set_title(f"{title_target} {title_channel} slit={title_slit}\"")
-    ax.set_xlabel("Wavelength [A]")
+    ax.set_xlabel(r"Observed-frame air wavelength [$\mathrm{\AA}$]")
     ax.set_ylabel(ylabel)
     return fig, ax, path
 
@@ -324,10 +324,11 @@ def plot_flexure_curve(
     if chunk_table is None and hasattr(rv_result_or_curve, "chunk_rvs"):
         chunk_table = rv_result_or_curve.chunk_rvs
     if chunk_table is not None and len(chunk_table):
-        ax.scatter(chunk_table["Wavelength Mid"], chunk_table["Flexure Correction"], marker="x", color="tab:orange", label="RV chunks")
+        chunk_wavelength = convert_air_to_vacuum(chunk_table["Wavelength Mid"].values.astype(float))
+        ax.scatter(chunk_wavelength, chunk_table["Flexure Correction"], marker="x", color="tab:orange", label="RV chunks")
         if show_chunk_evaluation and np.sum(good) >= 1:
-            chunk_min = np.nanmin(chunk_table["Wavelength Mid"].values.astype(float))
-            chunk_max = np.nanmax(chunk_table["Wavelength Mid"].values.astype(float))
+            chunk_min = np.nanmin(chunk_wavelength)
+            chunk_max = np.nanmax(chunk_wavelength)
             x = np.linspace(chunk_min, chunk_max, 300)
             y = evaluate_telluric_flexure_curve(x, curve, fallback_flexure=np.nan, poly_degree=poly_degree)
             inside = (x >= good_min) & (x <= good_max)
@@ -340,13 +341,20 @@ def plot_flexure_curve(
     if len(curve) and "Wavelength" in curve:
         x_values.extend(curve["Wavelength"].values.astype(float))
     if chunk_table is not None and len(chunk_table) and "Wavelength Mid" in chunk_table:
-        x_values.extend(chunk_table["Wavelength Mid"].values.astype(float))
+        x_values.extend(convert_air_to_vacuum(chunk_table["Wavelength Mid"].values.astype(float)))
     x_values = np.asarray(x_values, dtype=float)
     finite_x = x_values[np.isfinite(x_values)]
     if show_halpha and len(finite_x) and np.nanmin(finite_x) < blue_anchor_wavelength_max < np.nanmax(finite_x):
         ax.axvline(blue_anchor_wavelength_max, color="0.45", linestyle=":", linewidth=1, label="H-alpha")
 
-    ax.set_xlabel("Wavelength [A]")
+    flexure_source = getattr(rv_result_or_curve, "flexure_source", "")
+    if not flexure_source and hasattr(curve, "attrs"):
+        flexure_source = curve.attrs.get("Flexure Source", "")
+    if str(flexure_source).lower() in {"sky_emission", "sky", "emission"}:
+        wavelength_label = r"Sky-line catalog wavelength (vacuum) [$\mathrm{\AA}$]"
+    else:
+        wavelength_label = r"Telluric-window center (vacuum) [$\mathrm{\AA}$]"
+    ax.set_xlabel(wavelength_label)
     ax.set_ylabel("Flexure correction [km/s]")
     ax.legend()
     return ax
@@ -430,7 +438,7 @@ def plot_emission_line_fits(
         )
         ax.set_ylabel("Sky flux\n(arbitrary units)")
         ax.legend(loc="best", fontsize=8)
-    axes[min(len(line_wavelengths), len(axes)) - 1].set_xlabel("Wavelength [A]")
+    axes[min(len(line_wavelengths), len(axes)) - 1].set_xlabel(r"Observed-frame air wavelength [$\mathrm{\AA}$]")
     return fig, axes
 
 
@@ -455,10 +463,10 @@ def plot_chunk_model_overlays(fits_file, rv_result, template_wavelength, templat
         bad = m & ~diag["fit_mask"]
         if np.any(bad):
             ax.scatter(diag["wavelength"][bad], diag["observed"][bad], color="0.75", s=6, label="Masked")
-        ax.set_title(f"{chunk['Wavelength Min']:.0f}-{chunk['Wavelength Max']:.0f} A, RV={diag['rv']:.2f} km/s")
+        ax.set_title(f"{chunk['Wavelength Min']:.0f}-{chunk['Wavelength Max']:.0f} $\\mathrm{{\\AA}}$, RV={diag['rv']:.2f} km/s")
         ax.set_ylabel("Normalized flux")
         ax.legend(loc="best", fontsize=8)
-    axes[-1].set_xlabel("Wavelength [A]")
+    axes[-1].set_xlabel(r"Observed-frame air wavelength [$\mathrm{\AA}$]")
     fig.set_constrained_layout_pads(hspace=0.12)
     return fig, axes
 
@@ -480,7 +488,7 @@ def plot_chunk_chi2_curves(fits_file, rv_result, template_wavelength, template_f
         ax.plot(rv_grid, chi2 - np.nanmin(chi2), color="tab:blue")
         if np.isfinite(chunk["RV"]):
             ax.axvline(chunk["RV"], color="black", linestyle="--", linewidth=1)
-        ax.set_title(f"{chunk['Wavelength Min']:.0f}-{chunk['Wavelength Max']:.0f} A")
+        ax.set_title(f"{chunk['Wavelength Min']:.0f}-{chunk['Wavelength Max']:.0f} $\\mathrm{{\\AA}}$")
         ax.set_ylabel("Delta chi-squared")
     axes[-1].set_xlabel("Corrected RV [km/s]")
     fig.set_constrained_layout_pads(hspace=0.12)

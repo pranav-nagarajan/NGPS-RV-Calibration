@@ -204,7 +204,7 @@ def derive_sky_emission_flexure_curve(
 
         plt.figure(figsize=(7, 4))
         plt.scatter(curve["Air Wavelength [A]"], curve["Flexure Correction"], c=curve["Good"], cmap="coolwarm")
-        plt.xlabel("Sky-emission wavelength [Angstrom]")
+        plt.xlabel(r"Observed-frame air wavelength [$\mathrm{\AA}$]")
         plt.ylabel("Emission flexure [km/s]")
     return curve
 

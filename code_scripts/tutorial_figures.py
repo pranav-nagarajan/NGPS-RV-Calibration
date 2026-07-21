@@ -10,6 +10,7 @@ from scipy.ndimage import gaussian_filter1d
 from scipy.signal import medfilt
 
 from rv_helpers import (
+    C_KMS,
     convert_air_to_vacuum,
     doppler_shift,
     load_emission_line_catalog,
@@ -245,6 +246,18 @@ DISPLAY_SPIKE_MASKS = {
     "R": [(6576.13, 2.0), (7216.10, 0.75)],
     "I": [(8670.45, 2.6), (8674.04, 2.6)],
 }
+STELLAR_LINE_ANNOTATIONS = {
+    "U": [
+        (r"Ca II K", (3933.66,)),
+        (r"Ca II H", (3968.47,)),
+    ],
+    "G": [
+        (r"H$\beta$", (4861.33,)),
+        (r"Mg I b triplet", (5167.32, 5172.68, 5183.60)),
+    ],
+    "R": [(r"H$\alpha$", (6562.80,))],
+    "I": [(r"Ca II triplet", (8498.02, 8542.09, 8662.14))],
+}
 SKY_CHANNEL_WINDOWS = {
     "U": (3100, 4300),
     "G": (4170, 5900),
@@ -262,6 +275,7 @@ SKY_Y_LIMITS = {
 def plot_science_spectra_ugri(
     observed_spectra, *, channels=("U", "G", "R", "I"), figsize=(10, 10.6),
     target_name=DEFAULT_TARGET_NAME, slit_width_arcsec=DEFAULT_SLIT_WIDTH_ARCSEC, night=DEFAULT_NIGHT,
+    annotate_stellar_lines=False, stellar_line_velocity_kms=None,
 ):
     fig, axes = plt.subplots(len(channels), 1, figsize=figsize, constrained_layout=True)
     axes = np.atleast_1d(axes)
@@ -289,8 +303,37 @@ def plot_science_spectra_ugri(
         ax.plot(wavelength[visible], plot_norm[visible], color="black", linewidth=0.7, zorder=2)
         ax.set_xlim(low, high)
         ax.set_ylim(*SCIENCE_Y_LIMITS[channel])
+        if annotate_stellar_lines:
+            ymin, ymax = SCIENCE_Y_LIMITS[channel]
+            label_y = ymax - 0.045 * (ymax - ymin)
+            line_top = ymax - 0.13 * (ymax - ymin)
+            line_bottom = max(1.04, ymax - 0.24 * (ymax - ymin))
+            for label, line_wavelengths in STELLAR_LINE_ANNOTATIONS.get(channel, []):
+                line_wavelengths = np.asarray(line_wavelengths, dtype=float)
+                if stellar_line_velocity_kms is not None:
+                    velocity = stellar_line_velocity_kms.get(channel, 0.0) if isinstance(stellar_line_velocity_kms, dict) else stellar_line_velocity_kms
+                    line_wavelengths = line_wavelengths * (1 + float(velocity) / C_KMS)
+                in_view = line_wavelengths[(line_wavelengths >= low) & (line_wavelengths <= high)]
+                if not len(in_view):
+                    continue
+                ax.vlines(
+                    in_view, line_bottom, line_top, color="tab:blue", linewidth=0.9,
+                    alpha=0.9, zorder=3,
+                )
+                text_x = float(np.mean(in_view))
+                text_ha = "center"
+                if channel == "U" and label == "Ca II K":
+                    text_x -= 4
+                    text_ha = "right"
+                elif channel == "U" and label == "Ca II H":
+                    text_x += 4
+                    text_ha = "left"
+                ax.text(
+                    text_x, label_y, label, color="tab:blue",
+                    ha=text_ha, va="top", fontsize=11, zorder=4,
+                )
         ax.set_title(f"{channel} channel extracted 1D science spectrum")
-        ax.set_xlabel("Wavelength [A]")
+        ax.set_xlabel(r"Observed-frame air wavelength [$\mathrm{\AA}$]")
         ax.set_ylabel("Normalized flux")
     return fig, axes
 
@@ -321,7 +364,7 @@ def plot_sky_emission_spectra_ugri(
         ax.set_xlim(low, high)
         ax.set_ylim(*SKY_Y_LIMITS[channel])
         ax.set_title(f"{channel} channel extracted 1D sky spectrum")
-        ax.set_xlabel("Wavelength [A]")
+        ax.set_xlabel(r"Observed-frame air wavelength [$\mathrm{\AA}$]")
         ax.set_ylabel("Sky - continuum\n(arbitrary units)")
     return fig, axes
 
