@@ -20,6 +20,8 @@ The repository includes a HITRAN2020 telluric absorption model (`template_spectr
 
 `template`, which is the second required positional argument, supplies the stellar template spectrum. If the filename is recognized as a BOSZ template, the pipeline uses the bundled BOSZ wavelength grid (unless `--template-wavelength` is also supplied). Otherwise, the template file should either have two numeric columns, wavelength in Angstroms and flux, or one numeric flux column paired with a separate `--template-wavelength` file that supplies the 1D wavelength array.
 
+`--template-resolution` optionally specifies the intrinsic resolving power, $R=\lambda/\Delta\lambda$, of the stellar template. The default is $R=5000$, appropriate for the bundled BOSZ example. The pipeline uses this value to broaden a higher-resolution template to the measured resolution of the NGPS spectrum.
+
 `--flux-error` optionally supplies the 1D flux uncertainty. The file may either be one column with the same length as the extracted spectrum, or two columns containing wavelength in Angstroms and flux error. In the latter case, the errors are interpolated onto the observed wavelength grid.
 
 `--flexure-source` chooses how the flexure correction is measured. The default, `auto`, uses sky emission lines in G and telluric absorption features in R/I. Use `absorption` to force telluric absorption, or `emission` to force sky emission lines.

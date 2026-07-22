@@ -66,6 +66,7 @@ def parse_args():
     parser.add_argument("--flux-error", default=None, 
                         help="Path to optional flux-error file. File can have one column (flux error) or two columns (wavelength in Å and flux error).")
     parser.add_argument("--template-wavelength", default=None, help="Path to optional wavelength file for input template spectrum.")
+    parser.add_argument("--template-resolution", type=float, default=5000.0, help="Intrinsic resolution of the stellar template (default: R = 5000).")
     parser.add_argument("--flexure-source", choices=["auto", "absorption", "emission"], default="auto", 
                         help="Flexure source to use. Auto uses emission for G and absorption for R/I.")
     parser.add_argument("--emission-line-dir", default=None, 
@@ -213,6 +214,7 @@ def main():
         args.fits_file,
         template_wavelength,
         template_flux,
+        template_resolution=args.template_resolution,
         flexure_source=args.flexure_source,
         rv_bounds=rv_bounds,
         return_details=True,
