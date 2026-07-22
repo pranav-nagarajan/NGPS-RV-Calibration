@@ -24,7 +24,7 @@ from rv_helpers import (
 DEFAULT_EXAMPLE_TEMPLATE = "template_spectra/bosz2024_mp_t6000_g+4.0_m+0.00_a+0.00_c+0.00_v2_r5000_resam.txt.gz"
 G_MGB_REGION = (5150, 5700)
 R_H_ALPHA_REGION = (6400, 6600)
-I_CA_TRIPLET_REGION = (8450, 8700)
+I_CA_TRIPLET_REGION = (8400, 9000)
 DEFAULT_RV_REGIONS = {"G": G_MGB_REGION, "R": R_H_ALPHA_REGION, "I": I_CA_TRIPLET_REGION}
 
 
@@ -361,7 +361,7 @@ def _default_boundaries(obs_wl, channel):
         # Include H-alpha while still using robust chunks across the telluric-
         # anchored red side of the R arm.
         "R": np.arange(6400, 7501, 100),
-        "I": np.arange(8400, 8701, 100),
+        "I": np.arange(8400, 9001, 100),
     }
     channel_key = str(channel).upper()
     preferred = preferred_by_channel.get(channel_key)
