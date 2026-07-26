@@ -11,6 +11,7 @@ import pandas as pd
 
 from absorption_flexure import derive_telluric_stellar_flexure_curve, evaluate_telluric_flexure_curve, telluric_good_pixel_mask
 from emission_flexure import derive_sky_emission_flexure_curve, fit_sky_emission_line
+from flexure_uncertainty import estimate_combined_rv_flexure_uncertainty
 from rv_helpers import (
     DEFAULT_BOSZ_GRID, DEFAULT_BOSZ_WAVELENGTHS, DEFAULT_EMISSION_LINE_DIR, DEFAULT_TELLURIC_GRID, DEFAULT_TELLURIC_GRID_DIR, DEFAULT_TEMPLATE_RESOLUTION,
     DEFAULT_TELLURIC_MODEL_RESOLUTION, NGPS_CHANNEL_RANGES, _float_array, _header_float, _read_airmass, _read_channel, _read_coordinate_degrees,
@@ -51,6 +52,9 @@ class RVResult:
     chunk_rvs: pd.DataFrame = field(repr=False)
     initial_rv_guess: Optional[float] = None
     initial_rv_source: str = ""
+    rv_error_statistical: float = np.nan
+    rv_error_flexure: float = np.nan
+    flexure_mc_draws: int = 0
     resolution_table: Optional[pd.DataFrame] = field(default=None, repr=False)
     diagnostic_figures: Optional[dict] = field(default=None, repr=False)
 
@@ -477,13 +481,15 @@ def measure_rv(
     emission_min_line_separation="default", emission_empirical_coeffs=None,
     window_AA=120, step_AA=60, min_telluric_depth=0.02, min_telluric_area=0.2, max_flexure_error=35, min_telluric_scale=0.15,
     max_telluric_scale=2.8, max_stellar_scale=2.3, min_good_telluric_depth=0.08, curve_sigma_clip=4, spectral_resolution="auto",
-    blue_anchor_wavelength_max=6563, min_blue_good_telluric_depth=None, max_blue_flexure_error=None, min_blue_telluric_scale=0.3,
+    blue_anchor_wavelength_min=None, blue_anchor_wavelength_max=6563, min_blue_good_telluric_depth=None, max_blue_flexure_error=None,
+    min_blue_telluric_scale=0.3,
     max_blue_telluric_scale=2.5, max_blue_stellar_scale=1.2, min_blue_anchors=2, max_blue_flexure_deviation=12,
     resolution_emission_lines=None, resolution_window_size=5, resolution_min_lines=1, telluric_grid_path="auto", telluric_grid_dir=DEFAULT_TELLURIC_GRID_DIR,
     telluric_model_resolution=DEFAULT_TELLURIC_MODEL_RESOLUTION, template_resolution=DEFAULT_TEMPLATE_RESOLUTION, degrade_template=True,
     chunk_quality=True, min_chunk_fit_pixels=30, min_chunk_chi2_edge_delta=0.1, min_chunk_chi2_second_delta=1, min_chunk_rv_grid_edge_distance=5,
     max_chunk_reduced_chi2=np.inf, max_chunk_residual_spike_fraction="default", residual_spike_abs_threshold=2.0,
     min_snr="default", snr_lims=None, snr_window_AA=51, auto_seed_rv=True,
+    propagate_flexure_uncertainty=True, flexure_mc_draws=1000, flexure_mc_seed=0, flexure_anchor_covariance=None, flexure_anchor_correlation=0.0,
     bosz_wave_path=DEFAULT_BOSZ_WAVELENGTHS, bosz_grid_dir=DEFAULT_BOSZ_GRID, plot_diagnostics=False, diagnostic_kwargs=None, return_details=False,
 ):
     """
@@ -617,7 +623,8 @@ def measure_rv(
                 min_chunk_chi2_edge_delta=min_chunk_chi2_edge_delta, min_chunk_chi2_second_delta=min_chunk_chi2_second_delta,
                 min_chunk_rv_grid_edge_distance=min_chunk_rv_grid_edge_distance, max_chunk_reduced_chi2=max_chunk_reduced_chi2,
                 max_chunk_residual_spike_fraction=max_chunk_residual_spike_fraction, residual_spike_abs_threshold=residual_spike_abs_threshold,
-                min_snr=resolved_min_snr, snr_lims=snr_lims, snr_window_AA=snr_window_AA, auto_seed_rv=False, plot_diagnostics=False,
+                min_snr=resolved_min_snr, snr_lims=snr_lims, snr_window_AA=snr_window_AA, auto_seed_rv=False,
+                propagate_flexure_uncertainty=False, plot_diagnostics=False,
                 return_details=True,
             )
             if np.isfinite(seed_result.rv):
@@ -651,7 +658,8 @@ def measure_rv(
             min_telluric_depth=min_telluric_depth, min_telluric_area=min_telluric_area, obs_wavelengths_are_air=obs_wavelengths_are_air, model_kind=model_kind,
             fit_rv_offset=fit_rv_offset, curve_sigma_clip=curve_sigma_clip, max_flexure_error=max_flexure_error, min_telluric_scale=min_telluric_scale,
             max_telluric_scale=max_telluric_scale, max_stellar_scale=max_stellar_scale, min_good_telluric_depth=min_good_telluric_depth,
-            blue_anchor_wavelength_max=blue_anchor_wavelength_max, min_blue_good_telluric_depth=min_blue_good_telluric_depth,
+            blue_anchor_wavelength_min=blue_anchor_wavelength_min, blue_anchor_wavelength_max=blue_anchor_wavelength_max,
+            min_blue_good_telluric_depth=min_blue_good_telluric_depth,
             max_blue_flexure_error=max_blue_flexure_error, min_blue_telluric_scale=min_blue_telluric_scale,
             max_blue_telluric_scale=max_blue_telluric_scale, max_blue_stellar_scale=max_blue_stellar_scale, min_blue_anchors=min_blue_anchors,
             max_blue_flexure_deviation=max_blue_flexure_deviation,
@@ -683,6 +691,32 @@ def measure_rv(
         min_chunk_rv_grid_edge_distance=min_chunk_rv_grid_edge_distance, max_chunk_reduced_chi2=max_chunk_reduced_chi2,
         max_chunk_residual_spike_fraction=resolved_max_chunk_residual_spike_fraction, residual_spike_abs_threshold=residual_spike_abs_threshold,
     )
+    statistical_rv_error = float(combined_err)
+    flexure_rv_error = np.nan
+    completed_flexure_draws = 0
+    if bool(propagate_flexure_uncertainty) and np.isfinite(combined_rv) and np.isfinite(statistical_rv_error):
+        flexure_mc = estimate_combined_rv_flexure_uncertainty(
+            chunk_rvs,
+            flexure_curve,
+            n_draws=flexure_mc_draws,
+            random_state=flexure_mc_seed,
+            fallback_flexure=fallback_flexure,
+            poly_degree=curve_poly_degree,
+            obs_wavelengths_are_air=obs_wavelengths_are_air,
+            error_floor=error_floor,
+            anchor_covariance=flexure_anchor_covariance,
+            anchor_correlation=flexure_anchor_correlation,
+        )
+        flexure_rv_error = float(flexure_mc.sigma_rv_kms)
+        completed_flexure_draws = int(flexure_mc.n_draws)
+        if len(flexure_mc.chunk_sigma_kms) == len(chunk_rvs):
+            chunk_rvs["Flexure MC Error"] = flexure_mc.chunk_sigma_kms
+            chunk_rvs["RV Error Including Flexure"] = np.hypot(
+                chunk_rvs["RV Error"].values.astype(float),
+                flexure_mc.chunk_sigma_kms,
+            )
+        if np.isfinite(flexure_rv_error):
+            combined_err = float(np.hypot(statistical_rv_error, flexure_rv_error))
     flexure_curve.attrs["Measured Resolution"] = measured_resolution
     flexure_curve.attrs["Telluric Grid Path"] = str(resolved_telluric_grid_path)
     flexure_curve.attrs["Telluric Model Resolution"] = telluric_model_resolution
@@ -695,7 +729,9 @@ def measure_rv(
         n_chunks_used=int(np.sum(chunk_rvs["Use in Combined RV"].values)) if "Use in Combined RV" in chunk_rvs else 0,
         n_flexure_anchors=int(np.sum(flexure_curve["Good"].values)) if "Good" in flexure_curve else 0, spectral_resolution=float(measured_resolution),
         telluric_grid_path=str(resolved_telluric_grid_path), spectrum_snr=float(spectrum_snr), spectrum_flux_error=float(spectrum_flux_error),
-        low_snr=False, initial_rv_guess=initial_rv_guess, initial_rv_source=initial_rv_source, flexure_curve=flexure_curve,
+        low_snr=False, initial_rv_guess=initial_rv_guess, initial_rv_source=initial_rv_source,
+        rv_error_statistical=statistical_rv_error, rv_error_flexure=flexure_rv_error, flexure_mc_draws=completed_flexure_draws,
+        flexure_curve=flexure_curve,
         chunk_rvs=chunk_rvs, resolution_table=resolution_table,
     )
     if plot_diagnostics:

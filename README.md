@@ -36,12 +36,12 @@ The repository includes a HITRAN2020 telluric absorption model (`template_spectr
 
 ### Outputs
 
-The terminal prints the final RV and uncertainty in km/s.
+The terminal prints the final RV and total uncertainty in km/s, followed by the statistical chunk-combination and flexure-anchor contributions.
 
-`rv_summary.csv` summarizes the following information: the input file, channel, flexure source, barycentric correction, any initial RV guess, the final RV, and the RV error.
+`rv_summary.csv` summarizes the following information: the input file, channel, flexure source, barycentric correction, any initial RV guess, the final RV, and the statistical, flexure-anchor, and total RV errors.
 
 `flexure_curve.csv` gives the derived flexure correction curve (i.e., measured flexure as a function of air wavelength in the observer frame). `flexure_curve.png` visualizes this curve (in the R or I channels).
 
-`rv_chunks.csv` reports the stellar RV measurements in each wavelength chunk. It includes the observed-frame air-wavelength limits and midpoint in Angstroms, flexure correction applied at the midpoint, RV and RV error, corresponding chi-squared value, and whether each chunk was used in the robust combined RV. `rv_model_overlays.png` compares the normalized observed spectrum to the shifted stellar template on an observed-frame air-wavelength axis. `rv_chi2_curves.png` shows the corresponding chi-squared curves used to measure the best-fit chunk RVs.
+`rv_chunks.csv` reports the stellar RV measurements in each wavelength chunk. It includes the observed-frame air-wavelength limits and midpoint in Angstroms, flexure correction applied at the midpoint, RV and RV uncertainty, corresponding chi-squared value, and whether each chunk was used in the robust combined RV. `rv_model_overlays.png` compares the normalized observed spectrum to the shifted stellar template on an observed-frame air-wavelength axis. `rv_chi2_curves.png` shows the corresponding chi-squared curves used to measure the best-fit chunk RVs.
 
 `emission_line_fits.png` is saved if sky emission lines are used to derive the flexure correction. It shows the Gaussian fits to the selected emission lines.

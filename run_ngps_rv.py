@@ -171,18 +171,18 @@ def public_flexure_source_name(source):
 
 
 def public_rv_chunk_table(result):
-    columns = [
-        "Wavelength Min",
-        "Wavelength Max",
-        "Wavelength Mid",
-        "RV",
-        "RV Error",
-        "Flexure Correction",
-        "Best Fit Chi2",
-        "Reduced Chi2",
-        "Use in Combined RV",
-    ]
-    return result.chunk_rvs[[col for col in columns if col in result.chunk_rvs.columns]].rename(
+    source = result.chunk_rvs
+    output = source[
+        [col for col in ("Wavelength Min", "Wavelength Max", "Wavelength Mid") if col in source]
+    ].copy()
+    output["Flexure Correction"] = source.get("Flexure Correction", np.nan)
+    output["Flexure Error"] = source.get("Flexure MC Error", np.nan)
+    output["RV"] = source.get("RV", np.nan)
+    output["RV Error"] = source.get("RV Error Including Flexure", source.get("RV Error", np.nan))
+    for column in ("Best Fit Chi2", "Reduced Chi2", "Use in Combined RV"):
+        if column in source:
+            output[column] = source[column]
+    return output.rename(
         columns={
             "Wavelength Min": "Observed-frame air wavelength min [Å]",
             "Wavelength Max": "Observed-frame air wavelength max [Å]",
@@ -231,6 +231,9 @@ def main():
             "initial_rv_source": result.initial_rv_source,
             "rv_kms": result.rv,
             "rv_error_kms": result.rv_error,
+            "rv_statistical_error_kms": result.rv_error_statistical,
+            "rv_flexure_error_kms": result.rv_error_flexure,
+            "flexure_mc_draws": result.flexure_mc_draws,
         }
     ])
     summary.to_csv(outdir / "rv_summary.csv", index=False)
@@ -268,6 +271,11 @@ def main():
         savefig(outdir / "emission_line_fits.png")
 
     print(f"RV = {result.rv:.3f} +/- {result.rv_error:.3f} km/s")
+    print(
+        "Uncertainty components: "
+        f"statistical = {result.rv_error_statistical:.3f} km/s, "
+        f"flexure anchors = {result.rv_error_flexure:.3f} km/s"
+    )
     print(f"Saved outputs to {outdir.resolve()}")
 
 

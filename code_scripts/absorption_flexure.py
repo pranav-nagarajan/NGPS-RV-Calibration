@@ -159,7 +159,7 @@ def _joint_telluric_stellar_model(
 
 def quality_filter_telluric_stellar_curve(
     curve, max_flexure_error=35, min_telluric_scale=0.15, max_telluric_scale=2.8, max_stellar_scale=2.3, min_good_telluric_depth=0.08,
-    blue_anchor_wavelength_max=6563, min_blue_good_telluric_depth=None, max_blue_flexure_error=None, min_blue_telluric_scale=0.3,
+    blue_anchor_wavelength_min=None, blue_anchor_wavelength_max=6563, min_blue_good_telluric_depth=None, max_blue_flexure_error=None, min_blue_telluric_scale=0.3,
     max_blue_telluric_scale=2.5, max_blue_stellar_scale=1.2, min_blue_anchors=2, max_blue_flexure_deviation=12,
 ):
     """Mark only well-constrained telluric+stellar windows as flexure anchors."""
@@ -192,6 +192,8 @@ def quality_filter_telluric_stellar_curve(
     if min_blue_good_telluric_depth is not None and max_blue_flexure_error is not None:
         blue_good = base_good.copy()
         blue_good &= np.isfinite(wavelength) & (wavelength < blue_anchor_wavelength_max)
+        if blue_anchor_wavelength_min is not None:
+            blue_good &= wavelength >= float(blue_anchor_wavelength_min)
         blue_good &= np.isfinite(depth) & (depth >= min_blue_good_telluric_depth)
         blue_good &= np.isfinite(err) & (err <= max_blue_flexure_error)
         blue_good &= np.isfinite(telluric_scale) & (telluric_scale >= min_blue_telluric_scale) & (telluric_scale <= max_blue_telluric_scale)
@@ -316,7 +318,7 @@ def derive_telluric_stellar_flexure_curve(
     obs_wl, obs_flux, temp_wl, temp_flux, airmass, stellar_rv, bary_corr, channel="R", windows=None, flex_guess=None, flex_range=100, window_AA=120, step_AA=60,
     min_telluric_depth=0.02, min_telluric_area=0.2, obs_wavelengths_are_air=True, model_kind="multiplicative", fit_rv_offset=False, sigma_clip=5, curve_sigma_clip=4,
     max_flexure_error=35, min_telluric_scale=0.15, max_telluric_scale=2.8, max_stellar_scale=2.3, min_good_telluric_depth=0.08,
-    blue_anchor_wavelength_max=6563, min_blue_good_telluric_depth=None, max_blue_flexure_error=None, min_blue_telluric_scale=0.3,
+    blue_anchor_wavelength_min=None, blue_anchor_wavelength_max=6563, min_blue_good_telluric_depth=None, max_blue_flexure_error=None, min_blue_telluric_scale=0.3,
     max_blue_telluric_scale=2.5, max_blue_stellar_scale=1.2, min_blue_anchors=2, max_blue_flexure_deviation=12,
     telluric_grid_path=DEFAULT_TELLURIC_GRID, spectral_resolution=None, telluric_model_resolution=DEFAULT_TELLURIC_MODEL_RESOLUTION,
 ):
@@ -361,7 +363,8 @@ def derive_telluric_stellar_flexure_curve(
     curve["Success"] = curve["Success"].fillna(False).values.astype(bool)
     curve = quality_filter_telluric_stellar_curve(
         curve, max_flexure_error=max_flexure_error, min_telluric_scale=min_telluric_scale, max_telluric_scale=max_telluric_scale,
-        max_stellar_scale=max_stellar_scale, min_good_telluric_depth=min_good_telluric_depth, blue_anchor_wavelength_max=blue_anchor_wavelength_max,
+        max_stellar_scale=max_stellar_scale, min_good_telluric_depth=min_good_telluric_depth,
+        blue_anchor_wavelength_min=blue_anchor_wavelength_min, blue_anchor_wavelength_max=blue_anchor_wavelength_max,
         min_blue_good_telluric_depth=min_blue_good_telluric_depth, max_blue_flexure_error=max_blue_flexure_error,
         min_blue_telluric_scale=min_blue_telluric_scale, max_blue_telluric_scale=max_blue_telluric_scale,
         max_blue_stellar_scale=max_blue_stellar_scale, min_blue_anchors=min_blue_anchors, max_blue_flexure_deviation=max_blue_flexure_deviation,
