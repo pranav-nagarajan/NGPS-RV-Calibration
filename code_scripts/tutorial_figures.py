@@ -9,6 +9,11 @@ import numpy as np
 from scipy.ndimage import gaussian_filter1d
 from scipy.signal import medfilt
 
+# Match the Computer Modern typography used for titles, labels, ticks, and
+# legends throughout the other manuscript figures, even when the optional
+# scienceplots package is unavailable.
+plt.rcParams.update({"font.family": "cmr10", "mathtext.fontset": "cm"})
+
 from rv_helpers import (
     C_KMS,
     convert_air_to_vacuum,
@@ -279,7 +284,7 @@ def plot_science_spectra_ugri(
 ):
     fig, axes = plt.subplots(len(channels), 1, figsize=figsize, constrained_layout=True)
     axes = np.atleast_1d(axes)
-    fig.suptitle(f'{target_name}, {slit_width_arcsec:.2f}" slit, {night}', fontsize=15)
+    fig.suptitle(f'{target_name}: 1D science spectrum, {slit_width_arcsec:.2f}" slit, {night}', fontsize=15)
     for ax, channel in zip(axes, channels):
         wavelength, flux, _ = read_reduced_2d_spectrum(observed_spectra[channel])
         norm = _normalize_science_for_display(wavelength, flux, channel)
@@ -332,9 +337,9 @@ def plot_science_spectra_ugri(
                     text_x, label_y, label, color="tab:blue",
                     ha=text_ha, va="top", fontsize=11, zorder=4,
                 )
-        ax.set_title(f"{channel} channel extracted 1D science spectrum")
-        ax.set_xlabel(r"Observed-frame air wavelength [$\mathrm{\AA}$]")
+        ax.set_title(f"{channel} channel")
         ax.set_ylabel("Normalized flux")
+    axes[-1].set_xlabel(r"Observed-frame air wavelength [\AA]", usetex=True)
     return fig, axes
 
 
@@ -344,7 +349,7 @@ def plot_sky_emission_spectra_ugri(
 ):
     fig, axes = plt.subplots(len(channels), 1, figsize=figsize, constrained_layout=True)
     axes = np.atleast_1d(axes)
-    fig.suptitle(f'{target_name}, {slit_width_arcsec:.2f}" slit, {night}', fontsize=15)
+    fig.suptitle(f'{target_name}: 1D sky spectrum, {slit_width_arcsec:.2f}" slit, {night}', fontsize=15)
     for ax, channel in zip(axes, channels):
         wavelength, sky_flux, _, _ = read_sky_model_at_trace(observed_spectra[channel])
         sky_continuum = _median_continuum(sky_flux, 41)
@@ -363,9 +368,9 @@ def plot_sky_emission_spectra_ugri(
                 ax.vlines(in_view, marker_bottom, marker_top, color="tab:red", linewidth=0.55, alpha=0.9, zorder=3)
         ax.set_xlim(low, high)
         ax.set_ylim(*SKY_Y_LIMITS[channel])
-        ax.set_title(f"{channel} channel extracted 1D sky spectrum")
-        ax.set_xlabel(r"Observed-frame air wavelength [$\mathrm{\AA}$]")
+        ax.set_title(f"{channel} channel")
         ax.set_ylabel("Sky - continuum\n(arbitrary units)")
+    axes[-1].set_xlabel(r"Observed-frame air wavelength [\AA]", usetex=True)
     return fig, axes
 
 

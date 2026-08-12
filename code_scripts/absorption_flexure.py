@@ -8,7 +8,9 @@ from scipy.optimize import least_squares
 
 from rv_helpers import (
     C_KMS, DEFAULT_TELLURIC_GRID, DEFAULT_TELLURIC_MODEL_RESOLUTION, NGPS_CHANNEL_RANGES, _float_array, _odd_window, convert_air_to_vacuum, doppler_shift,
-    least_squares_errors, medfilt_fixed_window_AA, telluric_model_for_airmass,
+    binned_quantile_spline_continuum, least_squares_errors,
+    medfilt_fixed_window_AA, smoothly_blended_hybrid_continuum,
+    telluric_model_for_airmass,
 )
 
 
@@ -128,8 +130,8 @@ def build_telluric_flexure_windows(
 
 
 def _joint_telluric_stellar_model(
-    obs_wl, temp_wl, temp_flux, tell_wl, tell_flux, stellar_rv, bary_corr, flex_corr, telluric_scale, stellar_scale, continuum_coeffs, rv_offset=0,
-    model_kind="multiplicative",
+    obs_wl, temp_wl, temp_flux, tell_wl, tell_flux, stellar_rv, bary_corr,
+    flex_corr, telluric_scale, stellar_scale, continuum_coeffs,
 ):
     margin = 25
     temp_mask = (temp_wl > np.min(obs_wl) - margin) & (temp_wl < np.max(obs_wl) + margin)
@@ -137,7 +139,7 @@ def _joint_telluric_stellar_model(
     if np.sum(temp_mask) < 5 or np.sum(tell_mask) < 5:
         return np.full_like(obs_wl, np.nan, dtype=float)
 
-    stellar_shift = stellar_rv + flex_corr - bary_corr + rv_offset
+    stellar_shift = stellar_rv + flex_corr - bary_corr
     shifted_star = doppler_shift(temp_wl[temp_mask], temp_flux[temp_mask], stellar_shift)
     shifted_tell = doppler_shift(tell_wl[tell_mask], tell_flux[tell_mask], flex_corr)
     star_interp = np.interp(obs_wl, temp_wl[temp_mask], shifted_star, left=1, right=1)
@@ -150,11 +152,7 @@ def _joint_telluric_stellar_model(
 
     star_component = 1 + stellar_scale * (star_interp - 1)
     tell_component = 1 + telluric_scale * (tell_interp - 1)
-    if model_kind == "multiplicative":
-        spectral_model = star_component * tell_component
-    else:
-        spectral_model = 1 + stellar_scale * (star_interp - 1) + telluric_scale * (tell_interp - 1)
-    return continuum * spectral_model
+    return continuum * star_component * tell_component
 
 
 def quality_filter_telluric_stellar_curve(
@@ -215,9 +213,12 @@ def quality_filter_telluric_stellar_curve(
 
 
 def fit_telluric_stellar_flexure_window(
-    obs_wl, obs_flux, temp_wl, temp_flux, airmass, stellar_rv, bary_corr, window, flex_guess=0, flex_range=100, rv_offset_range=20, fit_rv_offset=False,
-    continuum_deg=1, continuum_window_AA=101, model_kind="multiplicative", min_pixels=40, min_telluric_depth=0.015, sigma_clip=5,
+    obs_wl, obs_flux, temp_wl, temp_flux, airmass, stellar_rv, bary_corr,
+    window, flex_guess=0, flex_range=100, continuum_deg=1,
+    continuum_window_AA=101, min_pixels=40, min_telluric_depth=0.015, sigma_clip=5,
     telluric_grid_path=DEFAULT_TELLURIC_GRID, spectral_resolution=None, telluric_model_resolution=DEFAULT_TELLURIC_MODEL_RESOLUTION,
+    normalization_kind="median", precomputed_continuum=None,
+    return_diagnostics=False,
 ):
     """Fit one telluric+stellar window and return its flexure correction."""
     obs_wl = _float_array(obs_wl)
@@ -233,7 +234,15 @@ def fit_telluric_stellar_flexure_window(
     if np.sum(m) < min_pixels:
         return {"Success": False, "Message": "too few observed pixels", "Wavelength": np.mean(window)}
 
-    continuum = medfilt_fixed_window_AA(obs_wl, obs_flux, window_AA=_odd_window(continuum_window_AA))
+    if precomputed_continuum is None:
+        continuum = medfilt_fixed_window_AA(
+            obs_wl, obs_flux, window_AA=_odd_window(continuum_window_AA)
+        )
+    else:
+        continuum = _float_array(precomputed_continuum)
+        if continuum.shape != obs_flux.shape:
+            raise ValueError("precomputed_continuum must match the observed flux shape")
+    fit_continuum_degree = continuum_deg
     norm_flux = np.divide(obs_flux, continuum, out=np.full_like(obs_flux, np.nan, dtype=float), where=continuum != 0)
     fit_wl = obs_wl[m]
     fit_flux = norm_flux[m]
@@ -252,85 +261,105 @@ def fit_telluric_stellar_flexure_window(
     if not np.isfinite(resid_scale) or resid_scale <= 0:
         resid_scale = 0.03
 
-    n_cont = continuum_deg + 1
+    n_cont = fit_continuum_degree + 1
     p0 = [flex_guess, 1.0, 1.0]
     lo = [flex_guess - flex_range, 0.0, 0.0]
     hi = [flex_guess + flex_range, 3.0, 2.5]
-    if fit_rv_offset:
-        p0.append(0.0)
-        lo.append(-rv_offset_range)
-        hi.append(rv_offset_range)
     p0 += [0.0] * n_cont
     lo += [-0.35] * n_cont
     hi += [0.35] * n_cont
 
     def unpack(params):
-        flex_corr = params[0]
-        telluric_scale = params[1]
-        stellar_scale = params[2]
-        offset_idx = 3
-        if fit_rv_offset:
-            rv_offset = params[3]
-            offset_idx = 4
-        else:
-            rv_offset = 0
-        return flex_corr, telluric_scale, stellar_scale, rv_offset, params[offset_idx:]
+        return params[0], params[1], params[2], params[3:]
+
+    def fitted_model(params):
+        flex_corr, telluric_scale, stellar_scale, continuum_coeffs = unpack(params)
+        return _joint_telluric_stellar_model(
+            fit_wl, temp_wl, temp_flux, tell_wl, tell_flux, stellar_rv,
+            bary_corr, flex_corr, telluric_scale, stellar_scale,
+            continuum_coeffs,
+        )
 
     def residuals(params, use_mask=None):
-        flex_corr, telluric_scale, stellar_scale, rv_offset, continuum_coeffs = unpack(params)
-        model = _joint_telluric_stellar_model(
-            fit_wl, temp_wl, temp_flux, tell_wl, tell_flux, stellar_rv, bary_corr, flex_corr, telluric_scale, stellar_scale, continuum_coeffs,
-            rv_offset=rv_offset, model_kind=model_kind,
-        )
+        model = fitted_model(params)
         resid = (model - fit_flux) / resid_scale
         if use_mask is not None:
             resid = resid[use_mask]
         return resid[np.isfinite(resid)]
 
     result = least_squares(residuals, p0, bounds=(lo, hi), max_nfev=800)
+    fit_mask = np.ones(len(fit_wl), dtype=bool)
     if sigma_clip is not None and result.success:
-        flex_corr, telluric_scale, stellar_scale, rv_offset, continuum_coeffs = unpack(result.x)
-        model = _joint_telluric_stellar_model(
-            fit_wl, temp_wl, temp_flux, tell_wl, tell_flux, stellar_rv, bary_corr, flex_corr, telluric_scale, stellar_scale, continuum_coeffs,
-            rv_offset=rv_offset, model_kind=model_kind,
-        )
+        model = fitted_model(result.x)
         full_resid = (model - fit_flux) / resid_scale
         finite = np.isfinite(full_resid)
         scatter = 1.4826 * np.nanmedian(np.abs(full_resid[finite] - np.nanmedian(full_resid[finite])))
         if np.isfinite(scatter) and scatter > 0:
-            fit_mask = finite & (np.abs(full_resid) < sigma_clip * scatter)
-            if np.sum(fit_mask) >= min_pixels:
+            clipped_mask = finite & (np.abs(full_resid) < sigma_clip * scatter)
+            if np.sum(clipped_mask) >= min_pixels:
+                fit_mask = clipped_mask
                 result = least_squares(lambda p: residuals(p, fit_mask), result.x, bounds=(lo, hi), max_nfev=800)
 
     errs = least_squares_errors(result)
-    flex_corr, telluric_scale, stellar_scale, rv_offset, continuum_coeffs = unpack(result.x)
+    flex_corr, telluric_scale, stellar_scale, continuum_coeffs = unpack(result.x)
     near_edge = abs(flex_corr - flex_guess) > 0.95 * flex_range
 
-    return {
+    output = {
         "Success": bool(result.success and not near_edge), "Message": result.message, "Wavelength": np.mean(window), "Window Min": low, "Window Max": high,
         "Flexure Correction": flex_corr, "Flexure Correction Error": errs[0] if len(errs) > 0 else np.nan, "Telluric Scale": telluric_scale,
-        "Stellar Scale": stellar_scale, "RV Offset": rv_offset, "Telluric Depth": tell_depth, "N Pixels": len(fit_wl), "Telluric Grid Airmass": grid_airmass,
-        "Cost": result.cost,
+        "Stellar Scale": stellar_scale, "RV Offset": 0.0, "Telluric Depth": tell_depth,
+        "N Pixels": len(fit_wl), "Telluric Grid Airmass": grid_airmass,
+        "Cost": result.cost, "Telluric Scale Kind": "linear",
+        "Matched Model Normalization": False,
+        "Normalization Kind": normalization_kind, "Depth Scales Fitted": True,
+        "Continuum Flux Scale": np.nan,
     }
+    if return_diagnostics:
+        output.update(
+            {
+                "Fit Wavelength": fit_wl,
+                "Fit Flux": fit_flux,
+                "Fit Model": fitted_model(result.x),
+                "Fit Mask": fit_mask,
+                "Continuum Coefficients": continuum_coeffs,
+            }
+        )
+    return output
 
 
 def derive_telluric_stellar_flexure_curve(
     obs_wl, obs_flux, temp_wl, temp_flux, airmass, stellar_rv, bary_corr, channel="R", windows=None, flex_guess=None, flex_range=100, window_AA=120, step_AA=60,
-    min_telluric_depth=0.02, min_telluric_area=0.2, obs_wavelengths_are_air=True, model_kind="multiplicative", fit_rv_offset=False, sigma_clip=5, curve_sigma_clip=4,
+    min_telluric_depth=0.02, min_telluric_area=0.2, obs_wavelengths_are_air=True, sigma_clip=5, curve_sigma_clip=4,
     max_flexure_error=35, min_telluric_scale=0.15, max_telluric_scale=2.8, max_stellar_scale=2.3, min_good_telluric_depth=0.08,
     blue_anchor_wavelength_min=None, blue_anchor_wavelength_max=6563, min_blue_good_telluric_depth=None, max_blue_flexure_error=None, min_blue_telluric_scale=0.3,
     max_blue_telluric_scale=2.5, max_blue_stellar_scale=1.2, min_blue_anchors=2, max_blue_flexure_deviation=12,
     telluric_grid_path=DEFAULT_TELLURIC_GRID, spectral_resolution=None, telluric_model_resolution=DEFAULT_TELLURIC_MODEL_RESOLUTION,
+    normalization_kind="a_band_blend_binned_spline", hybrid_edge_padding_AA=30.0,
+    a_band_window=(7580.0, 7700.0), a_band_minimum_overlap_AA=30.0,
 ):
     """Fit flexure anchors over one spectrum and return a wavelength-flexure table."""
     obs_wl = _float_array(obs_wl)
     obs_flux = _float_array(obs_flux)
     fit_wl = convert_air_to_vacuum(obs_wl) if obs_wavelengths_are_air else obs_wl
 
+    median_continuum = medfilt_fixed_window_AA(fit_wl, obs_flux, window_AA=101)
+    a_band_continuum = None
+    if normalization_kind == "a_band_blend_binned_spline":
+        spline_continuum = binned_quantile_spline_continuum(fit_wl, obs_flux)
+        a_band_continuum = smoothly_blended_hybrid_continuum(
+            fit_wl, median_continuum, spline_continuum,
+            a_band_window, transition_AA=hybrid_edge_padding_AA,
+        )
+    elif normalization_kind != "median":
+        raise ValueError("normalization_kind must be 'median' or 'a_band_blend_binned_spline'.")
+
     if flex_guess is None:
         flex_guess = standard_telluric_anchor_flexure(
-            obs_wl, obs_flux, airmass, channel=channel, obs_wavelengths_are_air=obs_wavelengths_are_air, telluric_grid_path=telluric_grid_path,
-            spectral_resolution=spectral_resolution, telluric_model_resolution=telluric_model_resolution,
+            obs_wl, obs_flux, airmass, channel=channel,
+            obs_wavelengths_are_air=obs_wavelengths_are_air,
+            telluric_grid_path=telluric_grid_path,
+            spectral_resolution=spectral_resolution,
+            telluric_model_resolution=telluric_model_resolution,
         )
 
     if windows is None:
@@ -347,10 +376,26 @@ def derive_telluric_stellar_flexure_curve(
     rows = []
     this_guess = flex_guess
     for _, row in windows.iterrows():
+        window_normalization_kind = "median"
+        window_continuum = None
+        if normalization_kind == "a_band_blend_binned_spline":
+            a_band_low, a_band_high = map(float, a_band_window)
+            overlap_AA = max(
+                0.0,
+                min(float(row["Window Max"]), a_band_high)
+                - max(float(row["Window Min"]), a_band_low),
+            )
+            if overlap_AA > max(0.0, float(a_band_minimum_overlap_AA)):
+                window_normalization_kind = normalization_kind
+                window_continuum = a_band_continuum
         result = fit_telluric_stellar_flexure_window(
             fit_wl, obs_flux, temp_wl, temp_flux, airmass, stellar_rv, bary_corr, (row["Window Min"], row["Window Max"]), flex_guess=this_guess,
-            flex_range=flex_range, fit_rv_offset=fit_rv_offset, model_kind=model_kind, min_telluric_depth=min_telluric_depth, sigma_clip=sigma_clip,
-            telluric_grid_path=telluric_grid_path, spectral_resolution=spectral_resolution, telluric_model_resolution=telluric_model_resolution,
+            flex_range=flex_range, min_telluric_depth=min_telluric_depth,
+            sigma_clip=sigma_clip, telluric_grid_path=telluric_grid_path,
+            spectral_resolution=spectral_resolution,
+            telluric_model_resolution=telluric_model_resolution,
+            normalization_kind=window_normalization_kind,
+            precomputed_continuum=window_continuum,
         )
         if result.get("Success"):
             this_guess = result["Flexure Correction"]
@@ -384,7 +429,16 @@ def derive_telluric_stellar_flexure_curve(
     curve.attrs["Fallback Flexure"] = flex_guess
     curve.attrs["Channel"] = channel
     curve.attrs["Airmass"] = airmass
-    curve.attrs["Model Kind"] = model_kind
+    curve.attrs["Model Kind"] = "multiplicative"
+    curve.attrs["Telluric Scale Kind"] = "linear"
+    curve.attrs["Matched Model Normalization"] = False
+    curve.attrs["Telluric Resolution Mode"] = "constant_R"
+    curve.attrs["Resolution Reference Wavelength"] = None
+    curve.attrs["Normalization Kind"] = normalization_kind
+    curve.attrs["A-band Window"] = tuple(map(float, a_band_window))
+    curve.attrs["A-band Minimum Window Overlap"] = float(a_band_minimum_overlap_AA)
+    curve.attrs["A-band Blend Width"] = float(hybrid_edge_padding_AA)
+    curve.attrs["Depth Scales Fitted"] = True
     curve.attrs["Telluric Grid Path"] = str(telluric_grid_path)
     return curve
 

@@ -4,7 +4,8 @@
 Example
 -------
 python run_ngps_rv.py observed_spectra/spec2d_ngps_260515_0087_R.fits \
-    template_spectra/bosz2024_mp_t6000_g+4.0_m+0.00_a+0.00_c+0.00_v2_r5000_resam.txt.gz \
+    template_spectra/bosz2024_mp_t6000_g+4.0_m+0.00_a+0.00_c+0.00_v2_r50000_resam.txt.gz \
+    --template-wavelength template_spectra/bosz2024_wave_r50000.txt \
     --flexure-source absorption --output-dir rv_output
 """
 
@@ -43,7 +44,9 @@ CODE_DIR = SCRIPT_DIR / "code_scripts"
 if str(CODE_DIR) not in sys.path:
     sys.path.insert(0, str(CODE_DIR))
 
-from rv_diagnostics import plot_chunk_chi2_curves, plot_chunk_model_overlays, plot_emission_line_fits, plot_flexure_curve
+from rv_diagnostics import (
+    plot_chunk_chi2_curves, plot_chunk_model_overlays, plot_emission_line_fits, plot_flexure_curve, plot_telluric_anchor_fits,
+)
 from rv_helpers import convert_vacuum_to_air, read_reduced_2d_spectrum
 from wavelength_dependent_rvs import DEFAULT_BOSZ_WAVELENGTHS, load_example_template, measure_ngps_rv
 
@@ -66,7 +69,7 @@ def parse_args():
     parser.add_argument("--flux-error", default=None, 
                         help="Path to optional flux-error file. File can have one column (flux error) or two columns (wavelength in Å and flux error).")
     parser.add_argument("--template-wavelength", default=None, help="Path to optional wavelength file for input template spectrum.")
-    parser.add_argument("--template-resolution", type=float, default=5000.0, help="Intrinsic resolution of the stellar template (default: R = 5000).")
+    parser.add_argument("--template-resolution", type=float, default=50000.0, help="Intrinsic resolution of the stellar template (default: R = 50,000).")
     parser.add_argument("--flexure-source", choices=["auto", "absorption", "emission"], default="auto", 
                         help="Flexure source to use. Auto uses emission for G and absorption for R/I.")
     parser.add_argument("--emission-line-dir", default=None, 
@@ -129,7 +132,11 @@ def load_flux_error(path, fits_file):
     if data.ndim == 1:
         return data.astype(float)
     if data.ndim == 2 and data.shape[1] >= 2:
-        obs_wavelength, _, _ = read_reduced_2d_spectrum(fits_file)
+        # This preliminary read only supplies the interpolation grid. The
+        # science extraction and default cosmic-ray cleaning happen later.
+        obs_wavelength, _, _ = read_reduced_2d_spectrum(
+            fits_file, clip_cosmic_rays=False
+        )
         return np.interp(obs_wavelength, data[:, 0].astype(float), data[:, 1].astype(float), left=np.nan, right=np.nan)
     raise ValueError("--flux-error must be a one-column error vector or a two-column wavelength/error table.")
 
@@ -225,15 +232,13 @@ def main():
         {
             "fits_file": str(args.fits_file),
             "channel": result.channel,
+            "spectrum_snr": result.spectrum_snr,
             "flexure_source": public_flexure_source_name(result.flexure_source),
             "barycentric_correction_kms": result.barycentric_correction,
             "initial_rv_guess_kms": result.initial_rv_guess,
             "initial_rv_source": result.initial_rv_source,
             "rv_kms": result.rv,
             "rv_error_kms": result.rv_error,
-            "rv_statistical_error_kms": result.rv_error_statistical,
-            "rv_flexure_error_kms": result.rv_error_flexure,
-            "flexure_mc_draws": result.flexure_mc_draws,
         }
     ])
     summary.to_csv(outdir / "rv_summary.csv", index=False)
@@ -245,6 +250,15 @@ def main():
         fig, ax = plt.subplots(figsize=(8, 4.5), constrained_layout=True)
         plot_flexure_curve(result, ax=ax, simple=True)
         savefig(outdir / "flexure_curve.png")
+
+    if result.flexure_source in {"telluric_stellar", "telluric", "absorption"}:
+        fig, axes = plot_telluric_anchor_fits(
+            args.fits_file,
+            result,
+            template_wavelength,
+            template_flux,
+        )
+        savefig(outdir / "telluric_anchor_fits.png")
 
     fig, axes = plot_chunk_model_overlays(
         args.fits_file,
@@ -271,12 +285,6 @@ def main():
         savefig(outdir / "emission_line_fits.png")
 
     print(f"RV = {result.rv:.3f} +/- {result.rv_error:.3f} km/s")
-    print(
-        "Uncertainty components: "
-        f"statistical = {result.rv_error_statistical:.3f} km/s, "
-        f"flexure anchors = {result.rv_error_flexure:.3f} km/s"
-    )
-    print(f"Saved outputs to {outdir.resolve()}")
 
 
 if __name__ == "__main__":

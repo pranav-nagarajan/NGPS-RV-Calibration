@@ -8,12 +8,15 @@ import numpy as np
 
 from astropy.io import fits
 
-from absorption_flexure import evaluate_telluric_flexure_curve, telluric_good_pixel_mask
+from absorption_flexure import evaluate_telluric_flexure_curve, fit_telluric_stellar_flexure_window, telluric_good_pixel_mask
 from rv_helpers import (
-    _float_array, _read_channel, convert_air_to_vacuum, convert_vacuum_to_air, degrade_spectrum_resolution, doppler_shift,
-    estimate_model_continuum_flux_error,
+    DEFAULT_TEMPLATE_RESOLUTION, _float_array, _read_channel,
+    binned_quantile_spline_continuum, convert_air_to_vacuum,
+    convert_vacuum_to_air, degrade_spectrum_resolution, doppler_shift,
+    estimate_der_flux_error, estimate_model_continuum_flux_error,
     estimate_normalized_flux_error, medfilt_fixed_window_AA,
-    load_emission_line_catalog, read_reduced_2d_spectrum, read_sky_model_at_trace, telluric_model_for_airmass,
+    load_emission_line_catalog, read_reduced_2d_spectrum, read_sky_model_at_trace,
+    smoothly_blended_hybrid_continuum, telluric_model_for_airmass,
 )
 from wavelength_dependent_rvs import _stellar_wavelengths_for_rv
 
@@ -126,7 +129,7 @@ def plot_reduced_1d_spectrum(
     title_channel = _read_channel(header, path, wavelength=wavelength, default=channel or "")
     title_slit = header.get("SLITW", slit_width)
     ax.set_title(f"{title_target} {title_channel} slit={title_slit}\"")
-    ax.set_xlabel(r"Observed-frame air wavelength [$\mathrm{\AA}$]")
+    ax.set_xlabel(r"Observed-frame air wavelength [\AA]", usetex=True)
     ax.set_ylabel(ylabel)
     return fig, ax, path
 
@@ -136,9 +139,118 @@ def _prepared_template(rv_result, template_wavelength, template_flux):
     temp_flux = _float_array(template_flux)
     attrs = getattr(rv_result, "flexure_curve", {}).attrs if hasattr(getattr(rv_result, "flexure_curve", None), "attrs") else {}
     if attrs.get("Template Degraded", False):
-        input_resolution = attrs.get("Template Resolution", 5000)
+        input_resolution = attrs.get("Template Resolution", DEFAULT_TEMPLATE_RESOLUTION)
         temp_flux = degrade_spectrum_resolution(temp_wl, temp_flux, output_resolution=rv_result.spectral_resolution, input_resolution=input_resolution)
     return temp_wl, temp_flux
+
+
+def telluric_anchor_fit_diagnostic(
+    fits_file, rv_result, template_wavelength, template_flux, anchor, *, obs_wavelengths_are_air=True, template_wavelengths_are_air=True,
+    aperture_half_width=2, trace_column=None, trace_y=None, continuum_window_AA=101, continuum_degree=1,
+):
+    """Refit one accepted telluric window and return the actual local best-fit model."""
+    obs_wl, obs_flux, _ = read_reduced_2d_spectrum(
+        fits_file, trace_column=trace_column, aperture_half_width=aperture_half_width, trace_y=trace_y
+    )
+    obs_wl = _float_array(obs_wl)
+    obs_flux = _float_array(obs_flux)
+    fit_wl = convert_air_to_vacuum(obs_wl) if obs_wavelengths_are_air else obs_wl
+
+    temp_wl, temp_flux = _prepared_template(rv_result, template_wavelength, template_flux)
+    if template_wavelengths_are_air:
+        temp_wl = convert_air_to_vacuum(temp_wl)
+
+    attrs = getattr(rv_result.flexure_curve, "attrs", {})
+    low = float(anchor["Window Min"])
+    high = float(anchor["Window Max"])
+    anchor_resolution = rv_result.spectral_resolution
+    normalization_kind = "median"
+    precomputed_continuum = None
+    if attrs.get("Normalization Kind") == "a_band_blend_binned_spline":
+        a_band_low, a_band_high = attrs.get("A-band Window", (7580.0, 7700.0))
+        minimum_overlap = float(attrs.get("A-band Minimum Window Overlap", 30.0))
+        overlap_AA = max(0.0, min(high, a_band_high) - max(low, a_band_low))
+        if overlap_AA > minimum_overlap:
+            median_continuum = medfilt_fixed_window_AA(fit_wl, obs_flux, window_AA=101)
+            spline_continuum = binned_quantile_spline_continuum(fit_wl, obs_flux)
+            precomputed_continuum = smoothly_blended_hybrid_continuum(
+                fit_wl,
+                median_continuum,
+                spline_continuum,
+                (a_band_low, a_band_high),
+                transition_AA=float(attrs.get("A-band Blend Width", 30.0)),
+            )
+            normalization_kind = "a_band_blend_binned_spline"
+    diagnostic = fit_telluric_stellar_flexure_window(
+        fit_wl,
+        obs_flux,
+        temp_wl,
+        temp_flux,
+        rv_result.airmass,
+        rv_result.stellar_rv_guess,
+        rv_result.barycentric_correction,
+        (low, high),
+        flex_guess=float(anchor["Flexure Correction"]),
+        continuum_deg=continuum_degree,
+        continuum_window_AA=continuum_window_AA,
+        telluric_grid_path=rv_result.telluric_grid_path,
+        spectral_resolution=anchor_resolution,
+        telluric_model_resolution=attrs.get("Telluric Model Resolution", None),
+        normalization_kind=normalization_kind,
+        precomputed_continuum=precomputed_continuum,
+        return_diagnostics=True,
+    )
+    display_wavelength = diagnostic["Fit Wavelength"]
+    if obs_wavelengths_are_air:
+        display_wavelength = convert_vacuum_to_air(display_wavelength)
+    diagnostic["Display Wavelength"] = display_wavelength
+    return diagnostic
+
+
+def plot_telluric_anchor_fits(
+    fits_file, rv_result, template_wavelength, template_flux, *, max_anchors=None, ncols=3, diagnostic_kwargs=None,
+):
+    """Plot the accepted telluric+stellar fits used to construct the flexure curve."""
+    import matplotlib.pyplot as plt
+
+    diagnostic_kwargs = {} if diagnostic_kwargs is None else dict(diagnostic_kwargs)
+    curve = rv_result.flexure_curve.copy()
+    if "Good" in curve:
+        curve = curve[curve["Good"].fillna(False).astype(bool)]
+    required = {"Window Min", "Window Max", "Wavelength", "Flexure Correction"}
+    if len(curve) == 0 or not required.issubset(curve.columns):
+        raise ValueError("No accepted telluric flexure windows are available to plot.")
+    curve = curve.sort_values("Wavelength")
+    if max_anchors is not None:
+        curve = curve.head(int(max_anchors))
+
+    ncols = max(1, min(int(ncols), len(curve)))
+    nrows = int(np.ceil(len(curve) / ncols))
+    fig, axes = plt.subplots(nrows, ncols, figsize=(4.2 * ncols, 2.8 * nrows), squeeze=False, constrained_layout=True)
+    flat_axes = axes.ravel()
+    for index, (ax, (_, anchor)) in enumerate(zip(flat_axes, curve.iterrows())):
+        diagnostic = telluric_anchor_fit_diagnostic(
+            fits_file, rv_result, template_wavelength, template_flux, anchor, **diagnostic_kwargs
+        )
+        wavelength = diagnostic["Display Wavelength"]
+        fit_mask = np.asarray(diagnostic.get("Fit Mask", np.ones(len(wavelength), dtype=bool)), dtype=bool)
+        ax.plot(wavelength, diagnostic["Fit Flux"], color="black", linewidth=0.9, label="Observed")
+        ax.plot(wavelength, diagnostic["Fit Model"], color="tab:red", linewidth=1.2, label="Best-fit model")
+        if np.any(~fit_mask):
+            ax.scatter(wavelength[~fit_mask], diagnostic["Fit Flux"][~fit_mask], s=10, facecolors="none", edgecolors="0.45", label="Clipped")
+        center_air = float(convert_vacuum_to_air(float(anchor["Wavelength"])))
+        flexure_error = float(anchor.get("Flexure Correction Error", np.nan))
+        flexure_label = f"{float(anchor['Flexure Correction']):+.1f}"
+        if np.isfinite(flexure_error):
+            flexure_label += f" +/- {flexure_error:.1f}"
+        ax.set_title(rf"{center_air:.0f} \AA; flexure {flexure_label} km s$^{{-1}}$", usetex=True)
+        ax.set_xlabel(r"Observed-frame air wavelength [\AA]", usetex=True)
+        ax.set_ylabel("Normalized flux")
+        if index == 0:
+            ax.legend(loc="best")
+    for ax in flat_axes[len(curve):]:
+        ax.set_visible(False)
+    return fig, axes
 
 
 def _shared_continuum_model(x, observed_flux, model, mask, degree=1):
@@ -259,9 +371,7 @@ def chunk_chi2_curve(
         best_model = np.interp(rv_wl, rv_temp_wl[temp_mask], shifted_template, left=1, right=1)
         flux_error = estimate_model_continuum_flux_error(norm_flux, best_model, mask=fit_mask)
     if not np.isfinite(flux_error) or flux_error <= 0:
-        flux_error = estimate_normalized_flux_error(
-            obs_wl, obs_flux, mask=fit_mask, continuum_lims=(low, high), continuum_window_AA=continuum_window_AA,
-        )
+        flux_error = estimate_der_flux_error(obs_wl, obs_flux, mask=fit_mask, continuum_lims=(low, high))
     norm_err = np.full_like(norm_flux, flux_error, dtype=float)
 
     for i, corrected_rv in enumerate(rv_grid):
@@ -356,8 +466,8 @@ def plot_flexure_curve(
     if show_halpha and len(finite_x) and np.nanmin(finite_x) < blue_anchor_wavelength_max < np.nanmax(finite_x):
         ax.axvline(blue_anchor_wavelength_max, color="0.45", linestyle=":", linewidth=1, label="H-alpha")
 
-    ax.set_xlabel(r"Observed-frame air wavelength [$\mathrm{\AA}$]")
-    ax.set_ylabel("Flexure correction [km/s]")
+    ax.set_xlabel(r"Observed-frame air wavelength [\AA]", usetex=True)
+    ax.set_ylabel(r"Flexure correction [km s$^{-1}$]")
     ax.legend()
     return ax
 
@@ -422,9 +532,12 @@ def plot_emission_line_fits(
             ax.plot(x_model, _gaussian_plus_line(params, x_model), color="tab:red", linewidth=1.2, label="Gaussian fit")
             ax.axvline(params[1], color="tab:red", linestyle="--", linewidth=1, label="Fit mean")
             if np.isfinite(flex_err):
-                annotation = f"flexure =\n{flex_corr:.1f} +/- {flex_err:.1f} km/s"
+                annotation = (
+                    f"flexure =\n{flex_corr:.1f} +/- {flex_err:.1f} "
+                    + r"km s$^{-1}$"
+                )
             else:
-                annotation = f"flexure =\n{flex_corr:.1f} km/s"
+                annotation = f"flexure =\n{flex_corr:.1f} " + r"km s$^{-1}$"
         except Exception:
             pass
         ax.set_title("")
@@ -440,7 +553,9 @@ def plot_emission_line_fits(
         )
         ax.set_ylabel("Sky flux\n(arbitrary units)")
         ax.legend(loc="best", fontsize=8)
-    axes[min(len(line_wavelengths), len(axes)) - 1].set_xlabel(r"Observed-frame air wavelength [$\mathrm{\AA}$]")
+    axes[min(len(line_wavelengths), len(axes)) - 1].set_xlabel(
+        r"Observed-frame air wavelength [\AA]", usetex=True
+    )
     return fig, axes
 
 
@@ -465,10 +580,14 @@ def plot_chunk_model_overlays(fits_file, rv_result, template_wavelength, templat
         bad = m & ~diag["fit_mask"]
         if np.any(bad):
             ax.scatter(diag["wavelength"][bad], diag["observed"][bad], color="0.75", s=6, label="Masked")
-        ax.set_title(f"{chunk['Wavelength Min']:.0f}-{chunk['Wavelength Max']:.0f} $\\mathrm{{\\AA}}$, RV={diag['rv']:.2f} km/s")
+        ax.set_title(
+            rf"{chunk['Wavelength Min']:.0f}-{chunk['Wavelength Max']:.0f} \AA, "
+            rf"RV={diag['rv']:.2f} km s$^{{-1}}$",
+            usetex=True,
+        )
         ax.set_ylabel("Normalized flux")
         ax.legend(loc="best", fontsize=8)
-    axes[-1].set_xlabel(r"Observed-frame air wavelength [$\mathrm{\AA}$]")
+    axes[-1].set_xlabel(r"Observed-frame air wavelength [\AA]", usetex=True)
     fig.set_constrained_layout_pads(hspace=0.12)
     return fig, axes
 
@@ -492,7 +611,7 @@ def plot_chunk_chi2_curves(fits_file, rv_result, template_wavelength, template_f
             ax.axvline(chunk["RV"], color="black", linestyle="--", linewidth=1)
         ax.set_title(f"{chunk['Wavelength Min']:.0f}-{chunk['Wavelength Max']:.0f} $\\mathrm{{\\AA}}$")
         ax.set_ylabel("Delta chi-squared")
-    axes[-1].set_xlabel("Corrected RV [km/s]")
+    axes[-1].set_xlabel(r"Corrected RV [km s$^{-1}$]")
     fig.set_constrained_layout_pads(hspace=0.12)
     return fig, axes
 
@@ -513,6 +632,11 @@ def plot_rv_diagnostics(
     fig_model, axes_model = plot_chunk_model_overlays(fits_file, rv_result, template_wavelength, template_flux, chunks=chunks, max_chunks=max_chunks, **model_kwargs)
     fig_chi2, axes_chi2 = plot_chunk_chi2_curves(fits_file, rv_result, template_wavelength, template_flux, chunks=chunks, max_chunks=max_chunks, **chi2_kwargs)
     figures = {"flexure": (fig_flex, ax_flex), "model_overlays": (fig_model, axes_model), "chi2_curves": (fig_chi2, axes_chi2)}
+    if str(getattr(rv_result, "flexure_source", "")).lower() in {"telluric_stellar", "telluric", "absorption"}:
+        fig_telluric, axes_telluric = plot_telluric_anchor_fits(
+            fits_file, rv_result, template_wavelength, template_flux
+        )
+        figures["telluric_anchor_fits"] = (fig_telluric, axes_telluric)
     if str(getattr(rv_result, "flexure_source", "")).lower() in {"sky_emission", "emission", "sky"}:
         fig_emission, axes_emission = plot_emission_line_fits(fits_file, rv_result, max_lines=max_chunks, **emission_fit_kwargs)
         figures["emission_line_fits"] = (fig_emission, axes_emission)
@@ -521,5 +645,6 @@ def plot_rv_diagnostics(
 
 __all__ = [
     "chunk_chi2_curve", "chunk_model_diagnostic", "find_reduced_spectrum_file", "plot_chunk_chi2_curves", "plot_chunk_model_overlays",
-    "plot_emission_line_fits", "plot_flexure_curve", "plot_reduced_1d_spectrum", "plot_rv_diagnostics",
+    "plot_emission_line_fits", "plot_flexure_curve", "plot_reduced_1d_spectrum", "plot_rv_diagnostics", "plot_telluric_anchor_fits",
+    "telluric_anchor_fit_diagnostic",
 ]

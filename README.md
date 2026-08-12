@@ -1,6 +1,6 @@
 # Measuring Radial Velocities with the Next Generation Palomar Spectrograph
 
-This repository serves as a tutorial for computing flexure corrections and radial velocities (RVs) with the Next Generation Palomar Spectrograph (NGPS) at Palomar Observatory. The method is calibrated using RV standard stars and will be described in detail in Nagarajan et al. (forthcoming).
+This repository serves as a tutorial for computing flexure corrections and radial velocities (RVs) with the Next Generation Palomar Spectrograph (NGPS) at Palomar Observatory. The method is calibrated using Gaia-ESO RV standard stars and will be described in detail in Nagarajan et al. (forthcoming).
 
 ## How to Use
 
@@ -12,15 +12,15 @@ python run_ngps_rv.py path/to/observed_spectrum \
   --output-dir example_rv_output
 ```
 
-The repository includes a HITRAN2020 telluric absorption model (`template_spectra/telluric_grid_airmass_default.npz`) and sky emission line tables from Hanuschik (2003) (`emission_lines/`), both of which are used by default.
+The repository includes the R=50,000 BOSZ spectrum selected for the bundled Gaia-ESO RV standard, its wavelength grid, a HITRAN2020 telluric absorption model (`template_spectra/telluric_grid_airmass_default.npz`), and sky emission line tables from Hanuschik (2003) (`emission_lines/`). These bundled files make the example self-contained.
 
 ### Inputs
 
-`fits_file` is the first required positional argument. It should be a reduced NGPS 2D FITS spectrum from the QuickLook Data Reduction Pipeline. Our pipeline extracts the 1D spectrum from this file, estimates the flux uncertainty if one is not supplied, derives the flexure correction, and measures the RV.
+`fits_file` is the first required positional argument. It should be a reduced NGPS 2D FITS spectrum from the QuickLook Data Reduction Pipeline. Our pipeline extracts the 1D spectrum from this file, derives the flexure correction, and measures the RV. 
 
 `template`, which is the second required positional argument, supplies the stellar template spectrum. If the filename is recognized as a BOSZ template, the pipeline uses the bundled BOSZ wavelength grid (unless `--template-wavelength` is also supplied). Otherwise, the template file should either have two numeric columns, wavelength in Angstroms and flux, or one numeric flux column paired with a separate `--template-wavelength` file that supplies the 1D wavelength array.
 
-`--template-resolution` optionally specifies the intrinsic resolving power, $R=\lambda/\Delta\lambda$, of the stellar template. The default is $R=5000$, appropriate for the bundled BOSZ example. The pipeline uses this value to broaden a higher-resolution template to the measured resolution of the NGPS spectrum.
+`--template-resolution` optionally specifies the intrinsic resolving power, $R=\lambda/\Delta\lambda$, of the stellar template. The default is $R=50{,}000$, appropriate for the bundled BOSZ example. The pipeline uses this value to broaden a higher-resolution template to the measured resolution of the NGPS spectrum.
 
 `--flux-error` optionally supplies the 1D flux uncertainty. The file may either be one column with the same length as the extracted spectrum, or two columns containing wavelength in Angstroms and flux error. In the latter case, the errors are interpolated onto the observed wavelength grid.
 
@@ -36,11 +36,13 @@ The repository includes a HITRAN2020 telluric absorption model (`template_spectr
 
 ### Outputs
 
-The terminal prints the final RV and total uncertainty in km/s, followed by the statistical chunk-combination and flexure-anchor contributions.
+The terminal prints the final RV and its total uncertainty in km/s.
 
-`rv_summary.csv` summarizes the following information: the input file, channel, flexure source, barycentric correction, any initial RV guess, the final RV, and the statistical, flexure-anchor, and total RV errors.
+`rv_summary.csv` summarizes the following information: the input file, channel, SNR, flexure source, barycentric correction, any initial RV guess, the final RV, and its total uncertainty.
 
 `flexure_curve.csv` gives the derived flexure correction curve (i.e., measured flexure as a function of air wavelength in the observer frame). `flexure_curve.png` visualizes this curve (in the R or I channels).
+
+`telluric_anchor_fits.png` is saved when telluric absorption is used to derive the flexure correction. It overlays the normalized observed spectrum and best-fit stellar + telluric model in each wavelength chunk. Sigma-clipped pixels are shown with open markers.
 
 `rv_chunks.csv` reports the stellar RV measurements in each wavelength chunk. It includes the observed-frame air-wavelength limits and midpoint in Angstroms, flexure correction applied at the midpoint, RV and RV uncertainty, corresponding chi-squared value, and whether each chunk was used in the robust combined RV. `rv_model_overlays.png` compares the normalized observed spectrum to the shifted stellar template on an observed-frame air-wavelength axis. `rv_chi2_curves.png` shows the corresponding chi-squared curves used to measure the best-fit chunk RVs.
 

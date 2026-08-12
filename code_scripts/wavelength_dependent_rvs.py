@@ -16,13 +16,13 @@ from rv_helpers import (
     DEFAULT_BOSZ_GRID, DEFAULT_BOSZ_WAVELENGTHS, DEFAULT_EMISSION_LINE_DIR, DEFAULT_TELLURIC_GRID, DEFAULT_TELLURIC_GRID_DIR, DEFAULT_TEMPLATE_RESOLUTION,
     DEFAULT_TELLURIC_MODEL_RESOLUTION, NGPS_CHANNEL_RANGES, _float_array, _header_float, _read_airmass, _read_channel, _read_coordinate_degrees,
     _read_observation_time, barycentric_correction, convert_air_to_vacuum, degrade_spectrum_resolution, doppler_shift, estimate_model_continuum_flux_error,
-    estimate_normalized_flux_error,
+    estimate_der_flux_error, estimate_der_snr, estimate_normalized_flux_error,
     load_bosz_wavelengths, measure_resolution, medfilt_fixed_window_AA, read_reduced_2d_spectrum, retrieve_bosz_spectrum, select_telluric_grid_path,
     set_data_dir, template_from_inputs, _resolve_path,
 )
 
 
-DEFAULT_EXAMPLE_TEMPLATE = "template_spectra/bosz2024_mp_t6000_g+4.0_m+0.00_a+0.00_c+0.00_v2_r5000_resam.txt.gz"
+DEFAULT_EXAMPLE_TEMPLATE = "template_spectra/bosz2024_mp_t6000_g+4.0_m+0.00_a+0.00_c+0.00_v2_r50000_resam.txt.gz"
 G_MGB_REGION = (5150, 5700)
 R_H_ALPHA_REGION = (6400, 6600)
 I_CA_TRIPLET_REGION = (8400, 9000)
@@ -61,7 +61,7 @@ class RVResult:
 
 def load_example_template(template_path=DEFAULT_EXAMPLE_TEMPLATE, wavelength_path=DEFAULT_BOSZ_WAVELENGTHS):
     """
-    Load the BOSZ template shipped with the public tutorial.
+    Load the default R=50,000 BOSZ template.
 
     The template file stores two columns that are converted into normalized
     flux as ``column_0 / column_1``, matching the original tutorial.
@@ -175,7 +175,7 @@ def radial_velocity_masked(
         "Residual Spike Fraction": np.nan,
         "Continuum Noise Pixels": 0,
         "Adaptive Model Continuum": False,
-        "Flux Error Method": "user supplied" if obs_fluxerr is not None else "normalized scatter fallback",
+        "Flux Error Method": "user supplied" if obs_fluxerr is not None else "DER_SNR fallback",
     }
 
     def finish(rv, rv_err):
@@ -204,7 +204,7 @@ def radial_velocity_masked(
         return finish(np.nan, np.nan)
 
     if obs_fluxerr is None:
-        flux_error = estimate_normalized_flux_error(obs_wavl, obs_flux, mask=fit_mask, continuum_lims=lims, continuum_window_AA=21)
+        flux_error = estimate_der_flux_error(obs_wavl, obs_flux, mask=fit_mask, continuum_lims=lims)
         norm_err = np.full_like(norm_flux, flux_error, dtype=float)
     else:
         norm_err = _float_array(obs_fluxerr) / continuum
@@ -476,7 +476,7 @@ def measure_rv(
     trace_y=None,
     obs_wavelengths_are_air=True,
     template_wavelengths_are_air=True, curve_poly_degree=None, fallback="anchor", rv_half_width=150, max_telluric_absorption=0.03, max_rv_err=25, sigma_clip=3,
-    error_floor=3, model_kind="multiplicative", fit_rv_offset=False, flexure_source="auto", emission_lines=None,
+    error_floor=3, flexure_source="auto", emission_lines=None,
     emission_line_dir=DEFAULT_EMISSION_LINE_DIR, emission_window_size=5, emission_min_lines=1, emission_min_strength="default",
     emission_min_line_separation="default", emission_empirical_coeffs=None,
     window_AA=120, step_AA=60, min_telluric_depth=0.02, min_telluric_area=0.2, max_flexure_error=35, min_telluric_scale=0.15,
@@ -488,6 +488,7 @@ def measure_rv(
     telluric_model_resolution=DEFAULT_TELLURIC_MODEL_RESOLUTION, template_resolution=DEFAULT_TEMPLATE_RESOLUTION, degrade_template=True,
     chunk_quality=True, min_chunk_fit_pixels=30, min_chunk_chi2_edge_delta=0.1, min_chunk_chi2_second_delta=1, min_chunk_rv_grid_edge_distance=5,
     max_chunk_reduced_chi2=np.inf, max_chunk_residual_spike_fraction="default", residual_spike_abs_threshold=2.0,
+    clip_extraction_cosmics=True, extraction_cosmic_sigma=15.0, extraction_cosmic_objlim=20.0,
     min_snr="default", snr_lims=None, snr_window_AA=51, auto_seed_rv=True,
     propagate_flexure_uncertainty=True, flexure_mc_draws=1000, flexure_mc_seed=0, flexure_anchor_covariance=None, flexure_anchor_correlation=0.0,
     bosz_wave_path=DEFAULT_BOSZ_WAVELENGTHS, bosz_grid_dir=DEFAULT_BOSZ_GRID, plot_diagnostics=False, diagnostic_kwargs=None, return_details=False,
@@ -507,7 +508,15 @@ def measure_rv(
     initial_rv_guess = None
     initial_rv_source = ""
 
-    obs_wl, obs_flux, header = read_reduced_2d_spectrum(fits_file, trace_column=trace_column, aperture_half_width=aperture_half_width, trace_y=trace_y)
+    obs_wl, obs_flux, header = read_reduced_2d_spectrum(
+        fits_file,
+        trace_column=trace_column,
+        aperture_half_width=aperture_half_width,
+        trace_y=trace_y,
+        clip_cosmic_rays=clip_extraction_cosmics,
+        cosmic_ray_sigma=extraction_cosmic_sigma,
+        cosmic_ray_objlim=extraction_cosmic_objlim,
+    )
     obs_fluxerr = None if obs_fluxerr is None else _float_array(obs_fluxerr)
     if obs_fluxerr is not None and len(obs_fluxerr) != len(obs_wl):
         raise ValueError("obs_fluxerr must have the same length as the extracted observed spectrum.")
@@ -527,8 +536,8 @@ def measure_rv(
 
     if snr_lims is None:
         snr_lims = _snr_lims_from_inputs(obs_wl, channel, rv_windows=rv_windows, rv_bounds=rv_bounds, rv_window_step=rv_window_step)
-    spectrum_flux_error, spectrum_snr = estimate_normalized_flux_error(
-        obs_wl, obs_flux, continuum_lims=snr_lims, continuum_window_AA=snr_window_AA, return_snr=True
+    spectrum_flux_error, spectrum_snr = estimate_der_flux_error(
+        obs_wl, obs_flux, continuum_lims=snr_lims, return_snr=True
     )
     if isinstance(min_snr, str):
         if min_snr.lower() != "default":
@@ -613,7 +622,7 @@ def measure_rv(
                 trace_column=trace_column, aperture_half_width=aperture_half_width, trace_y=trace_y, obs_wavelengths_are_air=obs_wavelengths_are_air,
                 template_wavelengths_are_air=template_wavelengths_are_air, curve_poly_degree=curve_poly_degree, fallback=fallback,
                 rv_half_width=rv_half_width, max_telluric_absorption=max_telluric_absorption, max_rv_err=max_rv_err, sigma_clip=sigma_clip,
-                error_floor=error_floor, model_kind=model_kind, fit_rv_offset=fit_rv_offset, flexure_source="sky_emission", emission_lines=emission_lines,
+                error_floor=error_floor, flexure_source="sky_emission", emission_lines=emission_lines,
                 emission_line_dir=emission_line_dir, emission_window_size=emission_window_size, emission_min_lines=emission_min_lines,
                 emission_min_strength=emission_min_strength, emission_min_line_separation=emission_min_line_separation,
                 emission_empirical_coeffs=emission_empirical_coeffs, resolution_emission_lines=resolution_emission_lines,
@@ -623,6 +632,8 @@ def measure_rv(
                 min_chunk_chi2_edge_delta=min_chunk_chi2_edge_delta, min_chunk_chi2_second_delta=min_chunk_chi2_second_delta,
                 min_chunk_rv_grid_edge_distance=min_chunk_rv_grid_edge_distance, max_chunk_reduced_chi2=max_chunk_reduced_chi2,
                 max_chunk_residual_spike_fraction=max_chunk_residual_spike_fraction, residual_spike_abs_threshold=residual_spike_abs_threshold,
+                clip_extraction_cosmics=clip_extraction_cosmics, extraction_cosmic_sigma=extraction_cosmic_sigma,
+                extraction_cosmic_objlim=extraction_cosmic_objlim,
                 min_snr=resolved_min_snr, snr_lims=snr_lims, snr_window_AA=snr_window_AA, auto_seed_rv=False,
                 propagate_flexure_uncertainty=False, plot_diagnostics=False,
                 return_details=True,
@@ -655,8 +666,8 @@ def measure_rv(
     if flexure_source in ["telluric_stellar", "telluric", "absorption"]:
         flexure_curve = derive_telluric_stellar_flexure_curve(
             obs_wl, obs_flux, flexure_temp_wl, temp_flux, obs_airmass, stellar_rv_guess, bary_corr, channel=channel, window_AA=window_AA, step_AA=step_AA,
-            min_telluric_depth=min_telluric_depth, min_telluric_area=min_telluric_area, obs_wavelengths_are_air=obs_wavelengths_are_air, model_kind=model_kind,
-            fit_rv_offset=fit_rv_offset, curve_sigma_clip=curve_sigma_clip, max_flexure_error=max_flexure_error, min_telluric_scale=min_telluric_scale,
+            min_telluric_depth=min_telluric_depth, min_telluric_area=min_telluric_area, obs_wavelengths_are_air=obs_wavelengths_are_air,
+            curve_sigma_clip=curve_sigma_clip, max_flexure_error=max_flexure_error, min_telluric_scale=min_telluric_scale,
             max_telluric_scale=max_telluric_scale, max_stellar_scale=max_stellar_scale, min_good_telluric_depth=min_good_telluric_depth,
             blue_anchor_wavelength_min=blue_anchor_wavelength_min, blue_anchor_wavelength_max=blue_anchor_wavelength_max,
             min_blue_good_telluric_depth=min_blue_good_telluric_depth,
@@ -694,7 +705,11 @@ def measure_rv(
     statistical_rv_error = float(combined_err)
     flexure_rv_error = np.nan
     completed_flexure_draws = 0
-    if bool(propagate_flexure_uncertainty) and np.isfinite(combined_rv) and np.isfinite(statistical_rv_error):
+    if (
+        bool(propagate_flexure_uncertainty)
+        and np.isfinite(combined_rv)
+        and np.isfinite(statistical_rv_error)
+    ):
         flexure_mc = estimate_combined_rv_flexure_uncertainty(
             chunk_rvs,
             flexure_curve,
@@ -749,6 +764,6 @@ __all__ = [
     "RVResult", "load_example_template", "measure_ngps_rv", "derive_flexure_curve", "measure_rv", "measure_rv_from_reduced_2d",
     "read_reduced_2d_spectrum", "set_data_dir", "derive_telluric_stellar_flexure_curve",
     "derive_sky_emission_flexure_curve", "fit_sky_emission_line", "evaluate_telluric_flexure_curve", "radial_velocity_masked", "combine_chunk_rvs",
-    "retrieve_bosz_spectrum", "measure_resolution", "estimate_normalized_flux_error", "rv_bounds_to_windows", "R_H_ALPHA_REGION", "I_CA_TRIPLET_REGION",
+    "retrieve_bosz_spectrum", "measure_resolution", "estimate_normalized_flux_error", "estimate_der_flux_error", "estimate_der_snr", "rv_bounds_to_windows", "R_H_ALPHA_REGION", "I_CA_TRIPLET_REGION",
     "G_MGB_REGION", "DEFAULT_RV_REGIONS",
 ]

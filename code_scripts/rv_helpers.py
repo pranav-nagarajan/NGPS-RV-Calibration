@@ -12,6 +12,7 @@ from astropy import units as u
 from astropy.coordinates import EarthLocation, SkyCoord
 from astropy.io import fits
 from astropy.time import Time
+from scipy.interpolate import PchipInterpolator
 from scipy.ndimage import gaussian_filter1d
 from scipy.optimize import least_squares
 from scipy.signal import medfilt
@@ -25,14 +26,19 @@ DEFAULT_TELLURIC_GRID = "template_spectra/telluric_grid_airmass_default.npz"
 DEFAULT_TELLURIC_GRID_DIR = "template_spectra"
 DEFAULT_TELLURIC_MODEL_RESOLUTION = 100000
 DEFAULT_EMISSION_LINE_DIR = "emission_lines"
-DEFAULT_BOSZ_WAVELENGTHS = "template_spectra/bosz2024_wave_r5000.txt"
+DEFAULT_BOSZ_WAVELENGTHS = "template_spectra/bosz2024_wave_r50000.txt"
 DEFAULT_BOSZ_GRID = "template_spectra"
-DEFAULT_TEMPLATE_RESOLUTION = 5000
+DEFAULT_TEMPLATE_RESOLUTION = 50000
 NGPS_CHANNEL_RANGES = {
     "U": (3100.0, 4360.0),
     "G": (4170.0, 5900.0),
     "R": (5610.0, 7940.0),
     "I": (7560.0, 10400.0),
+}
+DEFAULT_TRACE_WINDOWS = {
+    "G": (5150.0, 5700.0),
+    "R": (6400.0, 7500.0),
+    "I": (8400.0, 9000.0),
 }
 EMISSION_LINE_CHANNEL_RANGES = {
     "U": NGPS_CHANNEL_RANGES["U"],
@@ -220,6 +226,87 @@ def _trace_position(science, trace_column, search_width=30):
     return y_min + int(np.nanargmax(science[y_min:y_max, trace_column]))
 
 
+def _contiguous_true_segments(mask):
+    indices = np.flatnonzero(np.asarray(mask, dtype=bool))
+    if len(indices) == 0:
+        return []
+    breaks = np.flatnonzero(np.diff(indices) > 1)
+    starts = np.r_[0, breaks + 1]
+    stops = np.r_[breaks, len(indices) - 1]
+    return [(int(indices[start]), int(indices[stop])) for start, stop in zip(starts, stops)]
+
+
+def _trace_profile(residual, wavelength, wavelength_limits):
+    low, high = wavelength_limits
+    profile = np.full(residual.shape[0], np.nan, dtype=float)
+    for row in range(residual.shape[0]):
+        use = (
+            np.isfinite(wavelength[row])
+            & np.isfinite(residual[row])
+            & (wavelength[row] > low)
+            & (wavelength[row] < high)
+        )
+        if np.any(use):
+            profile[row] = np.nanmedian(residual[row, use])
+    return profile
+
+
+def _refine_trace_center(profile, peak, segment_start, segment_stop, half_width=4):
+    lo = max(segment_start, int(peak) - int(half_width))
+    hi = min(segment_stop, int(peak) + int(half_width))
+    rows = np.arange(lo, hi + 1, dtype=float)
+    values = np.asarray(profile[lo : hi + 1], dtype=float)
+    finite = np.isfinite(values)
+    if np.sum(finite) < 3:
+        return float(peak)
+    rows = rows[finite]
+    values = values[finite]
+    baseline = np.nanpercentile(values, 15)
+    weights = np.clip(values - baseline, 0, None)
+    if not np.isfinite(np.sum(weights)) or np.sum(weights) <= 0:
+        return float(peak)
+    return float(np.sum(rows * weights) / np.sum(weights))
+
+
+def _robust_trace_position(science, wavelength, channel=None, search_width=30):
+    """Locate the central science trace from a multi-column median profile."""
+    science = _float_array(science)
+    wavelength = _float_array(wavelength)
+    if wavelength.shape != science.shape:
+        raise ValueError("Robust trace finding requires a 2D wavelength image matching the science image.")
+
+    finite_per_row = np.sum(np.isfinite(wavelength), axis=1)
+    segments = _contiguous_true_segments(finite_per_row > max(20, science.shape[1] // 20))
+    if len(segments) == 3:
+        segment_start, segment_stop = segments[1]
+    else:
+        midpoint = science.shape[0] // 2
+        segment_start = max(0, midpoint - int(search_width))
+        segment_stop = min(science.shape[0] - 1, midpoint + int(search_width))
+
+    channel = str(channel or "").upper()
+    wavelength_limits = DEFAULT_TRACE_WINDOWS.get(channel, NGPS_CHANNEL_RANGES.get(channel))
+    if wavelength_limits is None:
+        finite = wavelength[np.isfinite(wavelength)]
+        if len(finite) == 0:
+            raise ValueError("The wavelength image has no finite pixels.")
+        wavelength_limits = tuple(np.nanpercentile(finite, [20, 80]))
+
+    profile = _trace_profile(science, wavelength, wavelength_limits)
+    midpoint = 0.5 * (segment_start + segment_stop)
+    search_start = max(segment_start, int(np.floor(midpoint - search_width)))
+    search_stop = min(segment_stop, int(np.ceil(midpoint + search_width)))
+    local = np.asarray(profile[search_start : search_stop + 1], dtype=float)
+    finite = np.isfinite(local)
+    if not np.any(finite):
+        raise ValueError("No finite science profile in the central slicer segment.")
+    fill = np.nanmedian(local[finite])
+    smooth = gaussian_filter1d(np.where(finite, local, fill), 1.0, mode="nearest")
+    peak = search_start + int(np.nanargmax(smooth))
+    center = _refine_trace_center(profile, peak, segment_start, segment_stop)
+    return int(np.rint(center))
+
+
 def _wavelength_1d(wavelength_data, science_shape, y0, y1, trace_y):
     wavelength_data = _float_array(wavelength_data)
     if wavelength_data.ndim == 1:
@@ -239,7 +326,57 @@ def _wavelength_1d(wavelength_data, science_shape, y0, y1, trace_y):
     raise ValueError("Could not turn the FITS wavelength extension into a 1D wavelength grid.")
 
 
-def read_reduced_2d_spectrum(fits_file, trace_column=None, aperture_half_width=2, trace_y=None, sky_hdu=2, wavelength_hdu=3):
+def clean_cosmic_rays_lacosmic(
+    image,
+    sigclip=15.0,
+    sigfrac=0.3,
+    objlim=20.0,
+    gain=1.0,
+    readnoise=5.0,
+    niter=3,
+    return_mask=False,
+):
+    """Conservatively clean a 2D image with the L.A.Cosmic algorithm."""
+    try:
+        from astroscrappy import detect_cosmics
+    except ImportError as exc:
+        raise ImportError(
+            "Cosmic-ray cleaning requires the optional 'astroscrappy' package."
+        ) from exc
+
+    image = _float_array(image)
+    if image.ndim != 2:
+        raise ValueError("image must be two-dimensional")
+    invalid = ~np.isfinite(image)
+    filled = np.where(invalid, 0.0, image)
+    cosmic_mask, cleaned = detect_cosmics(
+        filled,
+        inmask=invalid,
+        sigclip=float(sigclip),
+        sigfrac=float(sigfrac),
+        objlim=float(objlim),
+        gain=float(gain),
+        readnoise=float(readnoise),
+        satlevel=np.inf,
+        niter=int(niter),
+        cleantype="medmask",
+        verbose=False,
+    )
+    cleaned[invalid] = image[invalid]
+    return (cleaned, cosmic_mask) if return_mask else cleaned
+
+
+def read_reduced_2d_spectrum(
+    fits_file,
+    trace_column=None,
+    aperture_half_width=2,
+    trace_y=None,
+    sky_hdu=2,
+    wavelength_hdu=3,
+    clip_cosmic_rays=True,
+    cosmic_ray_sigma=15.0,
+    cosmic_ray_objlim=20.0,
+):
     """Read a reduced NGPS 2D spectrum and return a simple extracted 1D spectrum."""
     with fits.open(_resolve_path(fits_file, base_dir=Path.cwd())) as hdul:
         header = hdul[0].header.copy()
@@ -254,17 +391,25 @@ def read_reduced_2d_spectrum(fits_file, trace_column=None, aperture_half_width=2
         wavelength_data = _float_array(hdul[wavelength_hdu].data)
 
     sky_subtracted = science - sky
-    if trace_column is None:
-        trace_column = min(200, sky_subtracted.shape[1] - 1)
-    trace_column = int(np.clip(trace_column, 0, sky_subtracted.shape[1] - 1))
     if trace_y is None:
-        trace_y = _trace_position(sky_subtracted, trace_column)
+        if trace_column is None:
+            channel = _read_channel(header, fits_file, wavelength_data)
+            trace_y = _robust_trace_position(sky_subtracted, wavelength_data, channel=channel)
+        else:
+            trace_column = int(np.clip(trace_column, 0, sky_subtracted.shape[1] - 1))
+            trace_y = _trace_position(sky_subtracted, trace_column)
     trace_y = int(np.clip(trace_y, 0, sky_subtracted.shape[0] - 1))
 
     half_width = max(1, int(aperture_half_width))
     y0 = max(0, trace_y - half_width)
     y1 = min(sky_subtracted.shape[0], trace_y + half_width + 1)
     wavelength = _wavelength_1d(wavelength_data, sky_subtracted.shape, y0, y1, trace_y)
+    if clip_cosmic_rays:
+        sky_subtracted = clean_cosmic_rays_lacosmic(
+            sky_subtracted,
+            sigclip=cosmic_ray_sigma,
+            objlim=cosmic_ray_objlim,
+        )
     flux = np.nansum(sky_subtracted[y0:y1, :], axis=0)
     return wavelength, flux, header
 
@@ -280,11 +425,13 @@ def read_sky_model_at_trace(
         wavelength_data = _float_array(hdul[wavelength_hdu].data)
 
     sky_subtracted = science - sky
-    if trace_column is None:
-        trace_column = min(200, sky_subtracted.shape[1] - 1)
-    trace_column = int(np.clip(trace_column, 0, sky_subtracted.shape[1] - 1))
     if trace_y is None:
-        trace_y = _trace_position(sky_subtracted, trace_column)
+        if trace_column is None:
+            channel = _read_channel(header, fits_file, wavelength_data)
+            trace_y = _robust_trace_position(sky_subtracted, wavelength_data, channel=channel)
+        else:
+            trace_column = int(np.clip(trace_column, 0, sky_subtracted.shape[1] - 1))
+            trace_y = _trace_position(sky_subtracted, trace_column)
     trace_y = int(np.clip(trace_y, 0, sky_subtracted.shape[0] - 1))
 
     half_width = max(1, int(aperture_half_width))
@@ -859,6 +1006,65 @@ def medfilt_fixed_window_AA(wl, flux, window_AA=301):
     return continuum
 
 
+def binned_quantile_spline_continuum(
+    wl, flux, bin_AA=30.0, percentile=98.0, smooth_sigma_bins=1.5,
+):
+    """Estimate a smooth upper-envelope continuum without external packages."""
+    wl = _float_array(wl)
+    flux = _float_array(flux)
+    good = np.isfinite(wl) & np.isfinite(flux)
+    if np.sum(good) < 20:
+        raise ValueError("Binned-spline normalization requires at least 20 finite pixels.")
+
+    order = np.argsort(wl[good])
+    x = wl[good][order]
+    y = flux[good][order]
+    width = max(float(bin_AA), 5.0 * float(np.nanmedian(np.diff(x))))
+    edges = np.arange(x[0], x[-1] + width, width)
+    sample_wavelength, sample_flux = [], []
+    for left, right in zip(edges[:-1], edges[1:]):
+        use = (x >= left) & (x < right)
+        if np.sum(use) >= 5:
+            sample_wavelength.append(float(np.nanmedian(x[use])))
+            sample_flux.append(float(np.nanpercentile(y[use], float(percentile))))
+    sample_wavelength = np.asarray(sample_wavelength, dtype=float)
+    sample_flux = np.asarray(sample_flux, dtype=float)
+    if len(sample_wavelength) < 4:
+        return medfilt_fixed_window_AA(wl, flux, window_AA=101)
+
+    if float(smooth_sigma_bins) > 0:
+        sample_flux = gaussian_filter1d(sample_flux, float(smooth_sigma_bins), mode="nearest")
+    interpolator = PchipInterpolator(sample_wavelength, sample_flux, extrapolate=False)
+    continuum = np.asarray(interpolator(wl), dtype=float)
+    continuum[wl < sample_wavelength[0]] = sample_flux[0]
+    continuum[wl > sample_wavelength[-1]] = sample_flux[-1]
+    fallback = medfilt_fixed_window_AA(wl, flux, window_AA=101)
+    bad = ~np.isfinite(continuum) | (continuum <= 0)
+    continuum[bad] = fallback[bad]
+    return continuum
+
+
+def smoothly_blended_hybrid_continuum(
+    wl, median_continuum, alternative_continuum, window, transition_AA=30.0,
+):
+    """Blend an alternate in-band continuum into the median-filter continuum."""
+    wl = _float_array(wl)
+    median_continuum = _float_array(median_continuum)
+    alternative = _float_array(alternative_continuum)
+    low, high = map(float, window)
+    transition_AA = max(float(transition_AA), 1e-6)
+    weight = np.ones_like(wl, dtype=float)
+    blue = wl < low
+    red = wl > high
+    weight[blue] = np.clip((wl[blue] - (low - transition_AA)) / transition_AA, 0.0, 1.0)
+    weight[red] = np.clip(((high + transition_AA) - wl[red]) / transition_AA, 0.0, 1.0)
+    weight = weight * weight * (3.0 - 2.0 * weight)
+    hybrid = (1.0 - weight) * median_continuum + weight * alternative
+    bad = ~np.isfinite(hybrid) | (hybrid <= 0)
+    hybrid[bad] = median_continuum[bad]
+    return hybrid
+
+
 def estimate_normalized_flux_error(
     wavelength, flux, mask=None, continuum_lims=None, continuum_window_AA=21, continuum_percentile=60, sigma_clip=4, min_pixels=20, error_floor=1e-4,
     return_snr=False,
@@ -927,6 +1133,84 @@ def estimate_normalized_flux_error(
     flux_error = max(float(flux_error), float(error_floor))
     snr = 1 / flux_error if flux_error > 0 else np.nan
     return (flux_error, snr) if return_snr else flux_error
+
+
+def estimate_der_snr(
+    wavelength, flux, mask=None, continuum_lims=None, min_pixels=5, return_components=False,
+):
+    """Estimate a spectrum's S/N with the DER_SNR second-difference method.
+
+    This implements the robust, model-free estimator of Stoehr et al. (2008,
+    ASP Conference Series 394, 505):
+    the signal is the median flux and the noise is the scaled median absolute
+    second difference, using pixels separated by two samples.  Zero and
+    non-finite samples are omitted, matching the reference implementation.
+
+    Parameters
+    ----------
+    wavelength, flux : array-like
+        One-dimensional wavelength and extracted-flux arrays.
+    mask : array-like of bool, optional
+        Additional pixels to retain.
+    continuum_lims : (float, float), optional
+        Restrict the estimate to the same wavelength interval used by another
+        S/N estimator.
+    min_pixels : int, optional
+        Minimum number of retained samples.  At least five are required by the
+        second-difference stencil.
+    return_components : bool, optional
+        If true, return ``(snr, signal, noise)`` instead of only the S/N.
+    """
+    wavelength = _float_array(wavelength)
+    flux = _float_array(flux)
+    if wavelength.shape != flux.shape:
+        raise ValueError("wavelength and flux must have the same shape.")
+
+    good = np.isfinite(wavelength) & np.isfinite(flux) & (flux != 0)
+    if mask is not None:
+        supplied_mask = np.asarray(mask, dtype=bool)
+        if supplied_mask.shape != flux.shape:
+            raise ValueError("mask must have the same shape as wavelength and flux.")
+        good &= supplied_mask
+    if continuum_lims is not None:
+        low, high = np.asarray(continuum_lims, dtype=float)
+        good &= (wavelength > low) & (wavelength < high)
+
+    values = flux[good]
+    required = max(5, int(min_pixels))
+    if len(values) < required:
+        snr = signal = noise = np.nan
+    else:
+        signal = float(np.nanmedian(values))
+        second_difference = 2.0 * values[2:-2] - values[:-4] - values[4:]
+        noise = float(1.482602 / np.sqrt(6.0) * np.nanmedian(np.abs(second_difference)))
+        snr = float(signal / noise) if np.isfinite(noise) and noise > 0 else np.nan
+
+    return (snr, signal, noise) if return_components else snr
+
+
+def estimate_der_flux_error(
+    wavelength, flux, mask=None, continuum_lims=None, min_pixels=5, error_floor=1e-4, return_snr=False,
+):
+    """Return the DER_SNR estimate as a relative scalar flux uncertainty.
+
+    This wrapper provides the same ``flux_error`` interface used by the RV
+    fitter while retaining :func:`estimate_der_snr` as the public S/N
+    estimator.  The fitted-model continuum residuals still supersede this
+    initial value for the final uncertainty of a successfully fitted chunk.
+    """
+    snr = estimate_der_snr(
+        wavelength,
+        flux,
+        mask=mask,
+        continuum_lims=continuum_lims,
+        min_pixels=min_pixels,
+    )
+    if np.isfinite(snr) and snr > 0:
+        flux_error = max(1.0 / float(snr), float(error_floor))
+    else:
+        flux_error = 1.0
+    return (flux_error, float(snr)) if return_snr else flux_error
 
 
 def estimate_model_continuum_flux_error(
