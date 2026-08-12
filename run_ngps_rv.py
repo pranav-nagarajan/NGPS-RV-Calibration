@@ -20,11 +20,21 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 
+SCRIPT_DIR = Path(__file__).resolve().parent
+CODE_DIR = SCRIPT_DIR / "code_scripts"
+if not CODE_DIR.is_dir():
+    CODE_DIR = SCRIPT_DIR
+if str(CODE_DIR) not in sys.path:
+    sys.path.insert(0, str(CODE_DIR))
+
+from plot_style import configure_publication_font
+
 try:
     import scienceplots
     plt.style.use(["science", "no-latex"])
 except Exception:
     plt.style.use("default")
+configure_publication_font()
 plt.rcParams.update({
     "font.size": 13,
     "axes.labelsize": 15,
@@ -38,11 +48,6 @@ plt.rcParams.update({
     "ytick.right": True,
 })
 import pandas as pd
-
-SCRIPT_DIR = Path(__file__).resolve().parent
-CODE_DIR = SCRIPT_DIR / "code_scripts"
-if str(CODE_DIR) not in sys.path:
-    sys.path.insert(0, str(CODE_DIR))
 
 from rv_diagnostics import (
     plot_chunk_chi2_curves, plot_chunk_model_overlays, plot_emission_line_fits, plot_flexure_curve, plot_telluric_anchor_fits,

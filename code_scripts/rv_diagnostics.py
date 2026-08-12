@@ -8,6 +8,10 @@ import numpy as np
 
 from astropy.io import fits
 
+from plot_style import configure_publication_font
+
+configure_publication_font()
+
 from absorption_flexure import evaluate_telluric_flexure_curve, fit_telluric_stellar_flexure_window, telluric_good_pixel_mask
 from rv_helpers import (
     DEFAULT_TEMPLATE_RESOLUTION, _float_array, _read_channel,
@@ -129,7 +133,7 @@ def plot_reduced_1d_spectrum(
     title_channel = _read_channel(header, path, wavelength=wavelength, default=channel or "")
     title_slit = header.get("SLITW", slit_width)
     ax.set_title(f"{title_target} {title_channel} slit={title_slit}\"")
-    ax.set_xlabel(r"Observed-frame air wavelength [\AA]", usetex=True)
+    ax.set_xlabel("Observed-frame air wavelength [Å]")
     ax.set_ylabel(ylabel)
     return fig, ax, path
 
@@ -243,8 +247,8 @@ def plot_telluric_anchor_fits(
         flexure_label = f"{float(anchor['Flexure Correction']):+.1f}"
         if np.isfinite(flexure_error):
             flexure_label += f" +/- {flexure_error:.1f}"
-        ax.set_title(rf"{center_air:.0f} \AA; flexure {flexure_label} km s$^{{-1}}$", usetex=True)
-        ax.set_xlabel(r"Observed-frame air wavelength [\AA]", usetex=True)
+        ax.set_title(rf"{center_air:.0f} Å; flexure {flexure_label} km s$^{{-1}}$")
+        ax.set_xlabel("Observed-frame air wavelength [Å]")
         ax.set_ylabel("Normalized flux")
         if index == 0:
             ax.legend(loc="best")
@@ -466,7 +470,7 @@ def plot_flexure_curve(
     if show_halpha and len(finite_x) and np.nanmin(finite_x) < blue_anchor_wavelength_max < np.nanmax(finite_x):
         ax.axvline(blue_anchor_wavelength_max, color="0.45", linestyle=":", linewidth=1, label="H-alpha")
 
-    ax.set_xlabel(r"Observed-frame air wavelength [\AA]", usetex=True)
+    ax.set_xlabel("Observed-frame air wavelength [Å]")
     ax.set_ylabel(r"Flexure correction [km s$^{-1}$]")
     ax.legend()
     return ax
@@ -554,7 +558,7 @@ def plot_emission_line_fits(
         ax.set_ylabel("Sky flux\n(arbitrary units)")
         ax.legend(loc="best", fontsize=8)
     axes[min(len(line_wavelengths), len(axes)) - 1].set_xlabel(
-        r"Observed-frame air wavelength [\AA]", usetex=True
+        "Observed-frame air wavelength [Å]"
     )
     return fig, axes
 
@@ -581,13 +585,12 @@ def plot_chunk_model_overlays(fits_file, rv_result, template_wavelength, templat
         if np.any(bad):
             ax.scatter(diag["wavelength"][bad], diag["observed"][bad], color="0.75", s=6, label="Masked")
         ax.set_title(
-            rf"{chunk['Wavelength Min']:.0f}-{chunk['Wavelength Max']:.0f} \AA, "
+            rf"{chunk['Wavelength Min']:.0f}-{chunk['Wavelength Max']:.0f} Å, "
             rf"RV={diag['rv']:.2f} km s$^{{-1}}$",
-            usetex=True,
         )
         ax.set_ylabel("Normalized flux")
         ax.legend(loc="best", fontsize=8)
-    axes[-1].set_xlabel(r"Observed-frame air wavelength [\AA]", usetex=True)
+    axes[-1].set_xlabel("Observed-frame air wavelength [Å]")
     fig.set_constrained_layout_pads(hspace=0.12)
     return fig, axes
 
@@ -609,7 +612,7 @@ def plot_chunk_chi2_curves(fits_file, rv_result, template_wavelength, template_f
         ax.plot(rv_grid, chi2 - np.nanmin(chi2), color="tab:blue")
         if np.isfinite(chunk["RV"]):
             ax.axvline(chunk["RV"], color="black", linestyle="--", linewidth=1)
-        ax.set_title(f"{chunk['Wavelength Min']:.0f}-{chunk['Wavelength Max']:.0f} $\\mathrm{{\\AA}}$")
+        ax.set_title(f"{chunk['Wavelength Min']:.0f}-{chunk['Wavelength Max']:.0f} Å")
         ax.set_ylabel("Delta chi-squared")
     axes[-1].set_xlabel(r"Corrected RV [km s$^{-1}$]")
     fig.set_constrained_layout_pads(hspace=0.12)

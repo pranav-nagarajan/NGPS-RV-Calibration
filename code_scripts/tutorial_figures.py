@@ -9,10 +9,9 @@ import numpy as np
 from scipy.ndimage import gaussian_filter1d
 from scipy.signal import medfilt
 
-# Match the Computer Modern typography used for titles, labels, ticks, and
-# legends throughout the other manuscript figures, even when the optional
-# scienceplots package is unavailable.
-plt.rcParams.update({"font.family": "cmr10", "mathtext.fontset": "cm"})
+from plot_style import configure_publication_font
+
+configure_publication_font()
 
 from rv_helpers import (
     C_KMS,
@@ -339,7 +338,7 @@ def plot_science_spectra_ugri(
                 )
         ax.set_title(f"{channel} channel")
         ax.set_ylabel("Normalized flux")
-    axes[-1].set_xlabel(r"Observed-frame air wavelength [\AA]", usetex=True)
+    axes[-1].set_xlabel("Observed-frame air wavelength [Å]")
     return fig, axes
 
 
@@ -370,7 +369,7 @@ def plot_sky_emission_spectra_ugri(
         ax.set_ylim(*SKY_Y_LIMITS[channel])
         ax.set_title(f"{channel} channel")
         ax.set_ylabel("Sky - continuum\n(arbitrary units)")
-    axes[-1].set_xlabel(r"Observed-frame air wavelength [\AA]", usetex=True)
+    axes[-1].set_xlabel("Observed-frame air wavelength [Å]")
     return fig, axes
 
 

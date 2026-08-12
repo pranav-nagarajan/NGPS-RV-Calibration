@@ -12,7 +12,7 @@ python run_ngps_rv.py path/to/observed_spectrum \
   --output-dir example_rv_output
 ```
 
-The repository includes the R=50,000 BOSZ spectrum selected for the bundled Gaia-ESO RV standard, its wavelength grid, a HITRAN2020 telluric absorption model (`template_spectra/telluric_grid_airmass_default.npz`), and sky emission line tables from Hanuschik (2003) (`emission_lines/`). These bundled files make the example self-contained.
+The repository includes the $R=50{,}000$ BOSZ spectrum selected for the bundled Gaia-ESO RV standard, its wavelength grid, a HITRAN2020 telluric absorption model (`template_spectra/telluric_grid_airmass_default.npz`), and sky emission line tables from Hanuschik (2003) (`emission_lines/`). These bundled files make the example self-contained.
 
 ### Inputs
 
