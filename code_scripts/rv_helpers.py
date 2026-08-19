@@ -1138,12 +1138,12 @@ def estimate_normalized_flux_error(
 def estimate_der_snr(
     wavelength, flux, mask=None, continuum_lims=None, min_pixels=5, return_components=False,
 ):
-    """Estimate a spectrum's S/N with the DER_SNR second-difference method.
+    """Estimate a spectrum's S/N with the DER_SNR third-order method.
 
     This implements the robust, model-free estimator of Stoehr et al. (2008,
     ASP Conference Series 394, 505):
     the signal is the median flux and the noise is the scaled median absolute
-    second difference, using pixels separated by two samples.  Zero and
+    third-order flux difference, using pixels separated by two samples.  Zero and
     non-finite samples are omitted, matching the reference implementation.
 
     Parameters
@@ -1157,7 +1157,7 @@ def estimate_der_snr(
         S/N estimator.
     min_pixels : int, optional
         Minimum number of retained samples.  At least five are required by the
-        second-difference stencil.
+        third-order stencil.
     return_components : bool, optional
         If true, return ``(snr, signal, noise)`` instead of only the S/N.
     """
