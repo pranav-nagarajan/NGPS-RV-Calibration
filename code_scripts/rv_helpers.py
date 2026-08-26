@@ -688,21 +688,31 @@ def measure_resolution(
     for rest_wavelength in line_wavelengths:
         try:
             params, resolution, resolution_error = fit_sky_line_resolution(sky_wl, sky_flux, rest_wavelength, window_size=window_size, min_snr=min_snr)
-        except Exception:
+        except Exception as exc:
+            rows.append(
+                {
+                    "Air Wavelength [A]": rest_wavelength, "Fit Mean": np.nan, "Fit Sigma": np.nan, "FWHM [A]": np.nan,
+                    "Resolution": np.nan, "Resolution Error": np.nan, "Amplitude": np.nan, "Trace Pixel": fitted_trace_y,
+                    "Success": False, "Failure Reason": str(exc),
+                }
+            )
             continue
 
         fwhm = 2 * np.sqrt(2 * np.log(2)) * abs(params[2])
         rows.append(
             {
                 "Air Wavelength [A]": rest_wavelength, "Fit Mean": params[1], "Fit Sigma": params[2], "FWHM [A]": fwhm, "Resolution": resolution,
-                "Resolution Error": resolution_error, "Amplitude": params[0], "Trace Pixel": fitted_trace_y, "Success": True,
+                "Resolution Error": resolution_error, "Amplitude": params[0], "Trace Pixel": fitted_trace_y, "Success": True, "Failure Reason": "",
             }
         )
 
     table = pd.DataFrame(rows)
     if len(table) == 0:
         table = pd.DataFrame(
-            columns=["Air Wavelength [A]", "Fit Mean", "Fit Sigma", "FWHM [A]", "Resolution", "Resolution Error", "Amplitude", "Trace Pixel", "Success", "Good"]
+            columns=[
+                "Air Wavelength [A]", "Fit Mean", "Fit Sigma", "FWHM [A]", "Resolution", "Resolution Error", "Amplitude", "Trace Pixel",
+                "Success", "Failure Reason", "Good",
+            ]
         )
         return (np.nan, table) if return_table else np.nan
 
@@ -724,6 +734,29 @@ def measure_resolution(
     if np.sum(table["Good"].values) < min_lines:
         resolution = np.nan
     return (float(resolution), table) if return_table else float(resolution)
+
+
+# Empirical medians from the Gaia-ESO NGPS validation sample. These values are
+# used only when an individual exposure has no trustworthy sky-line width.
+_NOMINAL_RESOLUTION_BY_SLIT = {
+    "G": ((0.36, 4460.0), (0.50, 3990.0)),
+    "R": ((0.36, 3950.0), (0.50, 3410.0), (0.70, 2720.0)),
+    "I": ((0.36, 4780.0), (0.50, 3970.0), (0.70, 2950.0)),
+}
+
+
+def nominal_resolution_for_slit(channel, slit_width):
+    """Return the empirical NGPS resolving power for a channel/slit setup."""
+    channel = str(channel).strip().upper()
+    try:
+        slit_width = float(slit_width)
+    except (TypeError, ValueError):
+        return np.nan
+    calibration = _NOMINAL_RESOLUTION_BY_SLIT.get(channel)
+    if calibration is None or not np.isfinite(slit_width):
+        return np.nan
+    slit, resolution = np.asarray(calibration, dtype=float).T
+    return float(np.interp(slit_width, slit, resolution))
 
 
 def _resolve_telluric_grid_path(grid_path=DEFAULT_TELLURIC_GRID):

@@ -17,7 +17,8 @@ from rv_helpers import (
     DEFAULT_TELLURIC_MODEL_RESOLUTION, NGPS_CHANNEL_RANGES, _float_array, _header_float, _read_airmass, _read_channel, _read_coordinate_degrees,
     _read_observation_time, barycentric_correction, convert_air_to_vacuum, degrade_spectrum_resolution, doppler_shift, estimate_model_continuum_flux_error,
     estimate_der_flux_error, estimate_der_snr, estimate_normalized_flux_error,
-    load_bosz_wavelengths, measure_resolution, medfilt_fixed_window_AA, read_reduced_2d_spectrum, retrieve_bosz_spectrum, select_telluric_grid_path,
+    load_bosz_wavelengths, measure_resolution, medfilt_fixed_window_AA, nominal_resolution_for_slit, read_reduced_2d_spectrum, retrieve_bosz_spectrum,
+    select_telluric_grid_path,
     set_data_dir, template_from_inputs, _resolve_path,
 )
 
@@ -50,6 +51,7 @@ class RVResult:
     low_snr: bool
     flexure_curve: pd.DataFrame = field(repr=False)
     chunk_rvs: pd.DataFrame = field(repr=False)
+    resolution_source: str = "unknown"
     initial_rv_guess: Optional[float] = None
     initial_rv_source: str = ""
     rv_error_statistical: float = np.nan
@@ -57,6 +59,64 @@ class RVResult:
     flexure_mc_draws: int = 0
     resolution_table: Optional[pd.DataFrame] = field(default=None, repr=False)
     diagnostic_figures: Optional[dict] = field(default=None, repr=False)
+
+
+def _assess_sky_seed_result(
+    seed_result, *, min_anchors=5, max_curve_scatter=10.0, max_median_anchor_error=10.0, min_chunks=1, max_rv_error=25.0,
+):
+    """Return whether a sky-emission result is coherent enough to use as an RV seed."""
+    reasons = []
+    curve = seed_result.flexure_curve
+    good = curve.get("Good", pd.Series(False, index=curve.index)).fillna(False).astype(bool).to_numpy(copy=True)
+    wavelength = pd.to_numeric(curve.get("Wavelength"), errors="coerce").values.astype(float)
+    correction = pd.to_numeric(curve.get("Flexure Correction"), errors="coerce").values.astype(float)
+    good &= np.isfinite(wavelength) & np.isfinite(correction)
+    n_anchors = int(np.sum(good))
+    if n_anchors < int(min_anchors):
+        reasons.append(f"{n_anchors} anchors < {int(min_anchors)}")
+
+    curve_scatter = np.nan
+    if n_anchors >= 3:
+        x = wavelength[good]
+        x = (x - np.nanmedian(x)) / max(float(np.ptp(x)), 1.0)
+        degree = min(2 if str(seed_result.channel).upper() == "I" else 1, n_anchors - 2)
+        residual = correction[good] - np.polyval(np.polyfit(x, correction[good], degree), x)
+        curve_scatter = float(1.4826 * np.nanmedian(np.abs(residual - np.nanmedian(residual))))
+    if not np.isfinite(curve_scatter) or curve_scatter > float(max_curve_scatter):
+        reasons.append(f"curve scatter {curve_scatter:.1f} km/s > {float(max_curve_scatter):.1f}")
+
+    anchor_error = pd.to_numeric(curve.get("Flexure Correction Error"), errors="coerce").values.astype(float)
+    finite_anchor_error = anchor_error[good & np.isfinite(anchor_error)]
+    median_anchor_error = float(np.nanmedian(finite_anchor_error)) if len(finite_anchor_error) else np.nan
+    if not np.isfinite(median_anchor_error) or median_anchor_error > float(max_median_anchor_error):
+        reasons.append(f"median anchor error {median_anchor_error:.1f} km/s > {float(max_median_anchor_error):.1f}")
+    if int(seed_result.n_chunks_used) < int(min_chunks):
+        reasons.append(f"{int(seed_result.n_chunks_used)} RV chunks < {int(min_chunks)}")
+    if not np.isfinite(seed_result.rv) or not np.isfinite(seed_result.rv_error) or float(seed_result.rv_error) > float(max_rv_error):
+        reasons.append(f"seed uncertainty {float(seed_result.rv_error):.1f} km/s > {float(max_rv_error):.1f}")
+    metrics = {
+        "n_anchors": n_anchors,
+        "curve_scatter_kms": curve_scatter,
+        "median_anchor_error_kms": median_anchor_error,
+        "n_chunks": int(seed_result.n_chunks_used),
+    }
+    return len(reasons) == 0, "; ".join(reasons), metrics
+
+
+def _assess_coarse_flexure_seed(rv, rv_error, chunk_rvs, *, min_chunks=1, max_rv_error=25.0):
+    """Return whether a broad provisional RV is safe to use for one flexure refit."""
+    reasons = []
+    if not np.isfinite(rv):
+        reasons.append("no finite RV")
+    if not np.isfinite(rv_error) or float(rv_error) > float(max_rv_error):
+        reasons.append(f"uncertainty {float(rv_error):.1f} km/s > {float(max_rv_error):.1f}")
+    if "Use in Combined RV" in chunk_rvs:
+        n_chunks = int(np.sum(chunk_rvs["Use in Combined RV"].fillna(False).astype(bool)))
+    else:
+        n_chunks = 0
+    if n_chunks < int(min_chunks):
+        reasons.append(f"{n_chunks} RV chunks < {int(min_chunks)}")
+    return len(reasons) == 0, "; ".join(reasons)
 
 
 def load_example_template(template_path=DEFAULT_EXAMPLE_TEMPLATE, wavelength_path=DEFAULT_BOSZ_WAVELENGTHS):
@@ -484,12 +544,15 @@ def measure_rv(
     blue_anchor_wavelength_min=None, blue_anchor_wavelength_max=6563, min_blue_good_telluric_depth=None, max_blue_flexure_error=None,
     min_blue_telluric_scale=0.3,
     max_blue_telluric_scale=2.5, max_blue_stellar_scale=1.2, min_blue_anchors=2, max_blue_flexure_deviation=12,
-    resolution_emission_lines=None, resolution_window_size=5, resolution_min_lines=1, telluric_grid_path="auto", telluric_grid_dir=DEFAULT_TELLURIC_GRID_DIR,
+    resolution_emission_lines=None, resolution_window_size=5, resolution_min_lines=1, spectral_resolution_fallback="slit",
+    telluric_grid_path="auto", telluric_grid_dir=DEFAULT_TELLURIC_GRID_DIR,
     telluric_model_resolution=DEFAULT_TELLURIC_MODEL_RESOLUTION, template_resolution=DEFAULT_TEMPLATE_RESOLUTION, degrade_template=True,
     chunk_quality=True, min_chunk_fit_pixels=30, min_chunk_chi2_edge_delta=0.1, min_chunk_chi2_second_delta=1, min_chunk_rv_grid_edge_distance=5,
     max_chunk_reduced_chi2=np.inf, max_chunk_residual_spike_fraction="default", residual_spike_abs_threshold=2.0,
     clip_extraction_cosmics=True, extraction_cosmic_sigma=15.0, extraction_cosmic_objlim=20.0,
-    min_snr="default", snr_lims=None, snr_window_AA=51, auto_seed_rv=True,
+    min_snr="default", snr_lims=None, snr_window_AA=51, auto_seed_rv=True, auto_seed_quality_check=True,
+    auto_seed_min_anchors=5, auto_seed_max_curve_scatter=10.0, auto_seed_max_median_anchor_error=10.0,
+    auto_seed_min_chunks=1, auto_seed_max_rv_error=25.0, coarse_flexure_seed_fallback=True,
     propagate_flexure_uncertainty=True, flexure_mc_draws=1000, flexure_mc_seed=0, flexure_anchor_covariance=None, flexure_anchor_correlation=0.0,
     bosz_wave_path=DEFAULT_BOSZ_WAVELENGTHS, bosz_grid_dir=DEFAULT_BOSZ_GRID, plot_diagnostics=False, diagnostic_kwargs=None, return_details=False,
 ):
@@ -507,6 +570,7 @@ def measure_rv(
     user_supplied_rv_prior = rv_prior is not None
     initial_rv_guess = None
     initial_rv_source = ""
+    coarse_flexure_seed_pending = False
 
     obs_wl, obs_flux, header = read_reduced_2d_spectrum(
         fits_file,
@@ -579,6 +643,7 @@ def measure_rv(
         return result if return_details else (result.rv, result.rv_error)
 
     resolution_table = None
+    resolution_source = "none"
     if isinstance(spectral_resolution, str):
         if spectral_resolution.lower() != "auto":
             raise ValueError("spectral_resolution must be 'auto', None, or a numeric resolving power.")
@@ -586,10 +651,34 @@ def measure_rv(
             fits_file, emission_lines=resolution_emission_lines, channel=channel, trace_column=trace_column, trace_y=trace_y,
             window_size=resolution_window_size, min_lines=resolution_min_lines, return_table=True,
         )
+        resolution_source = "sky_emission" if np.isfinite(measured_resolution) else "unavailable"
+        if not np.isfinite(measured_resolution) and spectral_resolution_fallback is not None:
+            if isinstance(spectral_resolution_fallback, str):
+                if spectral_resolution_fallback.lower() != "slit":
+                    raise ValueError("spectral_resolution_fallback must be 'slit', None, or a numeric resolving power.")
+                fallback_resolution = nominal_resolution_for_slit(channel, header.get("SLITW", np.nan))
+                fallback_source = "slit_calibration"
+            else:
+                fallback_resolution = float(spectral_resolution_fallback)
+                fallback_source = "user_fallback"
+            if np.isfinite(fallback_resolution) and fallback_resolution > 0:
+                measured_resolution = float(fallback_resolution)
+                resolution_source = fallback_source
+                warnings.warn(
+                    f"Automatic sky-line resolution measurement failed for channel {channel}; using "
+                    f"R={measured_resolution:.0f} from {fallback_source.replace('_', ' ')}.",
+                    RuntimeWarning,
+                )
+            else:
+                warnings.warn(
+                    f"Automatic sky-line resolution measurement failed for channel {channel}, and no finite fallback is available.",
+                    RuntimeWarning,
+                )
     elif spectral_resolution is None:
         measured_resolution = np.nan
     else:
         measured_resolution = float(spectral_resolution)
+        resolution_source = "user"
 
     if isinstance(telluric_grid_path, str) and telluric_grid_path.lower() == "auto":
         resolved_telluric_grid_path = select_telluric_grid_path(
@@ -606,6 +695,7 @@ def measure_rv(
     if degrade_template and np.isfinite(measured_resolution):
         temp_flux = degrade_spectrum_resolution(temp_wl, temp_flux, output_resolution=measured_resolution, input_resolution=template_resolution)
     flexure_temp_wl = _stellar_template_wavelengths_for_flexure(temp_wl, template_wavelengths_are_air)
+    header_rv_guess = _header_float(header, ("RV", "VRAD", "VHELIO"), default=np.nan)
 
     should_auto_seed = (
         bool(auto_seed_rv)
@@ -626,7 +716,9 @@ def measure_rv(
                 emission_line_dir=emission_line_dir, emission_window_size=emission_window_size, emission_min_lines=emission_min_lines,
                 emission_min_strength=emission_min_strength, emission_min_line_separation=emission_min_line_separation,
                 emission_empirical_coeffs=emission_empirical_coeffs, resolution_emission_lines=resolution_emission_lines,
-                resolution_window_size=resolution_window_size, resolution_min_lines=resolution_min_lines, telluric_grid_path=resolved_telluric_grid_path,
+                resolution_window_size=resolution_window_size, resolution_min_lines=resolution_min_lines,
+                spectral_resolution=measured_resolution, spectral_resolution_fallback=spectral_resolution_fallback,
+                telluric_grid_path=resolved_telluric_grid_path,
                 telluric_grid_dir=telluric_grid_dir, telluric_model_resolution=telluric_model_resolution, template_resolution=template_resolution,
                 degrade_template=False, chunk_quality=chunk_quality, min_chunk_fit_pixels=min_chunk_fit_pixels,
                 min_chunk_chi2_edge_delta=min_chunk_chi2_edge_delta, min_chunk_chi2_second_delta=min_chunk_chi2_second_delta,
@@ -638,18 +730,35 @@ def measure_rv(
                 propagate_flexure_uncertainty=False, plot_diagnostics=False,
                 return_details=True,
             )
-            if np.isfinite(seed_result.rv):
+            seed_accepted = np.isfinite(seed_result.rv)
+            seed_reason = ""
+            if seed_accepted and auto_seed_quality_check:
+                seed_accepted, seed_reason, _ = _assess_sky_seed_result(
+                    seed_result, min_anchors=auto_seed_min_anchors, max_curve_scatter=auto_seed_max_curve_scatter,
+                    max_median_anchor_error=auto_seed_max_median_anchor_error, min_chunks=auto_seed_min_chunks,
+                    max_rv_error=auto_seed_max_rv_error,
+                )
+            if seed_accepted:
                 initial_rv_guess = float(seed_result.rv)
                 initial_rv_source = "sky_emission"
                 stellar_rv_guess = initial_rv_guess
                 rv_prior = initial_rv_guess
+            else:
+                initial_rv_source = f"sky_emission rejected: {seed_reason or 'no finite RV'}"
+                coarse_flexure_seed_pending = bool(coarse_flexure_seed_fallback) and not np.isfinite(header_rv_guess)
+                warnings.warn(
+                    f"Automatic sky-emission RV seed rejected for channel {channel}: {seed_reason or 'no finite RV'}. "
+                    "Continuing with the broad unseeded stellar-RV search.",
+                    RuntimeWarning,
+                )
         except Exception as exc:
             initial_rv_source = f"sky_emission failed: {exc}"
+            coarse_flexure_seed_pending = bool(coarse_flexure_seed_fallback) and not np.isfinite(header_rv_guess)
 
     if stellar_rv_guess is None and rv_prior is not None:
         stellar_rv_guess = rv_prior
     if stellar_rv_guess is None:
-        stellar_rv_guess = _header_float(header, ("RV", "VRAD", "VHELIO"), default=0.0)
+        stellar_rv_guess = header_rv_guess if np.isfinite(header_rv_guess) else 0.0
     stellar_rv_guess = float(stellar_rv_guess)
 
     if rv_windows is not None and rv_bounds is not None:
@@ -664,18 +773,21 @@ def measure_rv(
         boundaries = _default_boundaries(obs_wl, channel)
 
     if flexure_source in ["telluric_stellar", "telluric", "absorption"]:
-        flexure_curve = derive_telluric_stellar_flexure_curve(
-            obs_wl, obs_flux, flexure_temp_wl, temp_flux, obs_airmass, stellar_rv_guess, bary_corr, channel=channel, window_AA=window_AA, step_AA=step_AA,
-            min_telluric_depth=min_telluric_depth, min_telluric_area=min_telluric_area, obs_wavelengths_are_air=obs_wavelengths_are_air,
-            curve_sigma_clip=curve_sigma_clip, max_flexure_error=max_flexure_error, min_telluric_scale=min_telluric_scale,
-            max_telluric_scale=max_telluric_scale, max_stellar_scale=max_stellar_scale, min_good_telluric_depth=min_good_telluric_depth,
-            blue_anchor_wavelength_min=blue_anchor_wavelength_min, blue_anchor_wavelength_max=blue_anchor_wavelength_max,
-            min_blue_good_telluric_depth=min_blue_good_telluric_depth,
-            max_blue_flexure_error=max_blue_flexure_error, min_blue_telluric_scale=min_blue_telluric_scale,
-            max_blue_telluric_scale=max_blue_telluric_scale, max_blue_stellar_scale=max_blue_stellar_scale, min_blue_anchors=min_blue_anchors,
-            max_blue_flexure_deviation=max_blue_flexure_deviation,
-            telluric_grid_path=resolved_telluric_grid_path, spectral_resolution=measured_resolution, telluric_model_resolution=telluric_model_resolution,
-        )
+        def fit_telluric_flexure(stellar_guess):
+            return derive_telluric_stellar_flexure_curve(
+                obs_wl, obs_flux, flexure_temp_wl, temp_flux, obs_airmass, stellar_guess, bary_corr, channel=channel, window_AA=window_AA, step_AA=step_AA,
+                min_telluric_depth=min_telluric_depth, min_telluric_area=min_telluric_area, obs_wavelengths_are_air=obs_wavelengths_are_air,
+                curve_sigma_clip=curve_sigma_clip, max_flexure_error=max_flexure_error, min_telluric_scale=min_telluric_scale,
+                max_telluric_scale=max_telluric_scale, max_stellar_scale=max_stellar_scale, min_good_telluric_depth=min_good_telluric_depth,
+                blue_anchor_wavelength_min=blue_anchor_wavelength_min, blue_anchor_wavelength_max=blue_anchor_wavelength_max,
+                min_blue_good_telluric_depth=min_blue_good_telluric_depth,
+                max_blue_flexure_error=max_blue_flexure_error, min_blue_telluric_scale=min_blue_telluric_scale,
+                max_blue_telluric_scale=max_blue_telluric_scale, max_blue_stellar_scale=max_blue_stellar_scale, min_blue_anchors=min_blue_anchors,
+                max_blue_flexure_deviation=max_blue_flexure_deviation,
+                telluric_grid_path=resolved_telluric_grid_path, spectral_resolution=measured_resolution, telluric_model_resolution=telluric_model_resolution,
+            )
+
+        flexure_curve = fit_telluric_flexure(stellar_rv_guess)
     elif flexure_source in ["sky_emission", "emission", "sky"]:
         flexure_curve = derive_sky_emission_flexure_curve(
             fits_file, emission_lines, channel=channel, trace_column=trace_column, trace_y=trace_y, window_size=emission_window_size,
@@ -702,6 +814,38 @@ def measure_rv(
         min_chunk_rv_grid_edge_distance=min_chunk_rv_grid_edge_distance, max_chunk_reduced_chi2=max_chunk_reduced_chi2,
         max_chunk_residual_spike_fraction=resolved_max_chunk_residual_spike_fraction, residual_spike_abs_threshold=residual_spike_abs_threshold,
     )
+    if coarse_flexure_seed_pending:
+        coarse_seed_accepted, coarse_seed_reason = _assess_coarse_flexure_seed(
+            combined_rv, combined_err, chunk_rvs, min_chunks=auto_seed_min_chunks, max_rv_error=auto_seed_max_rv_error,
+        )
+        if coarse_seed_accepted:
+            initial_rv_guess = float(combined_rv)
+            initial_rv_source = f"coarse_stellar after {initial_rv_source}"
+            stellar_rv_guess = initial_rv_guess
+            flexure_curve = fit_telluric_flexure(stellar_rv_guess)
+            fallback_flexure = flexure_curve.attrs.get("Fallback Flexure", np.nan)
+            if fallback == "zero":
+                fallback_flexure = 0.0
+            elif fallback != "anchor":
+                fallback_flexure = np.nan
+            combined_rv, combined_err, chunk_rvs = _chunked_rvs_for_spectrum(
+                obs_wl, obs_flux, temp_wl, temp_flux, obs_airmass, bary_corr, flexure_curve, boundaries,
+                obs_wavelengths_are_air=obs_wavelengths_are_air, obs_fluxerr=obs_fluxerr, rv_prior=rv_prior,
+                rv_half_width=rv_half_width, curve_poly_degree=curve_poly_degree,
+                max_telluric_absorption=max_telluric_absorption, fallback_flexure=fallback_flexure,
+                max_rv_err=max_rv_err, sigma_clip=sigma_clip, error_floor=error_floor,
+                telluric_grid_path=resolved_telluric_grid_path,
+                template_wavelengths_are_air=template_wavelengths_are_air, spectral_resolution=measured_resolution,
+                telluric_model_resolution=telluric_model_resolution, chunk_quality=chunk_quality,
+                min_chunk_fit_pixels=min_chunk_fit_pixels, min_chunk_chi2_edge_delta=min_chunk_chi2_edge_delta,
+                min_chunk_chi2_second_delta=min_chunk_chi2_second_delta,
+                min_chunk_rv_grid_edge_distance=min_chunk_rv_grid_edge_distance,
+                max_chunk_reduced_chi2=max_chunk_reduced_chi2,
+                max_chunk_residual_spike_fraction=resolved_max_chunk_residual_spike_fraction,
+                residual_spike_abs_threshold=residual_spike_abs_threshold,
+            )
+        else:
+            initial_rv_source = f"{initial_rv_source}; coarse stellar fallback rejected: {coarse_seed_reason}"
     statistical_rv_error = float(combined_err)
     flexure_rv_error = np.nan
     completed_flexure_draws = 0
@@ -733,6 +877,7 @@ def measure_rv(
         if np.isfinite(flexure_rv_error):
             combined_err = float(np.hypot(statistical_rv_error, flexure_rv_error))
     flexure_curve.attrs["Measured Resolution"] = measured_resolution
+    flexure_curve.attrs["Resolution Source"] = resolution_source
     flexure_curve.attrs["Telluric Grid Path"] = str(resolved_telluric_grid_path)
     flexure_curve.attrs["Telluric Model Resolution"] = telluric_model_resolution
     flexure_curve.attrs["Template Resolution"] = template_resolution
@@ -743,6 +888,7 @@ def measure_rv(
         channel=channel, flexure_source=flexure_source, stellar_rv_guess=stellar_rv_guess,
         n_chunks_used=int(np.sum(chunk_rvs["Use in Combined RV"].values)) if "Use in Combined RV" in chunk_rvs else 0,
         n_flexure_anchors=int(np.sum(flexure_curve["Good"].values)) if "Good" in flexure_curve else 0, spectral_resolution=float(measured_resolution),
+        resolution_source=resolution_source,
         telluric_grid_path=str(resolved_telluric_grid_path), spectrum_snr=float(spectrum_snr), spectrum_flux_error=float(spectrum_flux_error),
         low_snr=False, initial_rv_guess=initial_rv_guess, initial_rv_source=initial_rv_source,
         rv_error_statistical=statistical_rv_error, rv_error_flexure=flexure_rv_error, flexure_mc_draws=completed_flexure_draws,
