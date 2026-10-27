@@ -7,6 +7,7 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import numpy as np
 from scipy.ndimage import gaussian_filter1d
+from scipy.optimize import curve_fit
 from scipy.signal import medfilt
 
 from plot_style import configure_publication_font
@@ -228,13 +229,13 @@ def _replace_with_neighbor_interpolation(wavelength, flux, center, half_width=2.
 
 
 SCIENCE_CHANNEL_WINDOWS = {
-    "U": (3100, 4300),
-    "G": (4170, 5900),
-    "R": (5800, 7870),
-    "I": (7545, 10400),
+    "U": (3060, 4430),
+    "G": (4150, 5925),
+    "R": (5645, 7950),
+    "I": (7540, 10380),
 }
 SCIENCE_Y_LIMITS = {
-    "U": (0.05, 1.75),
+    "U": (0.00, 1.75),
     "G": (0.45, 1.35),
     "R": (0.15, 1.25),
     "I": (0.00, 1.35),
@@ -254,6 +255,7 @@ STELLAR_LINE_ANNOTATIONS = {
     "U": [
         (r"Ca II K", (3933.66,)),
         (r"Ca II H", (3968.47,)),
+        (r"H$\gamma$", (4340.47,)),
     ],
     "G": [
         (r"H$\beta$", (4861.33,)),
@@ -263,10 +265,10 @@ STELLAR_LINE_ANNOTATIONS = {
     "I": [(r"Ca II triplet", (8498.02, 8542.09, 8662.14))],
 }
 SKY_CHANNEL_WINDOWS = {
-    "U": (3100, 4300),
-    "G": (4170, 5900),
-    "R": (5800, 7870),
-    "I": (7545, 10400),
+    "U": (3060, 4430),
+    "G": (4150, 5925),
+    "R": (5645, 7950),
+    "I": (7540, 10380),
 }
 SKY_Y_LIMITS = {
     "U": (-25, 500),
@@ -274,6 +276,50 @@ SKY_Y_LIMITS = {
     "R": (-125, 1200),
     "I": (-500, 7750),
 }
+
+
+def _observed_absorption_line_center(wavelength, flux, predicted):
+    """Locate a display marker using a local absorption-core fit, not an RV fit."""
+    use = np.isfinite(wavelength) & np.isfinite(flux) & (np.abs(wavelength - predicted) < 3.5)
+    if np.count_nonzero(use) < 6:
+        return predicted
+    x, y = wavelength[use], flux[use]
+
+    def model(x, baseline, slope, amplitude, center, sigma):
+        return baseline + slope * (x - center) - amplitude * np.exp(-0.5 * ((x - center) / sigma) ** 2)
+
+    try:
+        params, _ = curve_fit(
+            model, x, y, p0=[1, 0, max(0.05, 1 - y.min()), predicted, 0.8],
+            bounds=([0.3, -0.15, 0, predicted - 1.5, 0.2], [1.7, 0.15, 1.5, predicted + 1.5, 3]),
+            maxfev=10000,
+        )
+    except (ValueError, RuntimeError):
+        return predicted
+    return float(params[3])
+
+
+def _observed_sky_line_center(wavelength, flux, rest):
+    """Center a sky marker on the observed line, including its flexure shift."""
+    use = np.isfinite(wavelength) & np.isfinite(flux) & (np.abs(wavelength - rest) < 5)
+    if np.count_nonzero(use) < 6:
+        return rest
+    x, y = wavelength[use] - rest, flux[use]
+    baseline = float(np.percentile(y, 20))
+    peak = float(x[np.argmax(y)])
+
+    def model(x, amplitude, center, sigma, baseline, slope):
+        return baseline + slope * x + amplitude * np.exp(-0.5 * ((x - center) / sigma) ** 2)
+
+    try:
+        params, _ = curve_fit(
+            model, x, y, p0=[float(y.max() - baseline), np.clip(peak, -3.9, 3.9), 0.8, baseline, 0],
+            bounds=([0, -4.5, 0.2, -np.inf, -np.inf], [np.inf, 4.5, 3, np.inf, np.inf]),
+            maxfev=20000,
+        )
+    except (ValueError, RuntimeError):
+        return rest
+    return float(rest + params[1])
 
 
 def plot_science_spectra_ugri(
@@ -317,6 +363,9 @@ def plot_science_spectra_ugri(
                 if stellar_line_velocity_kms is not None:
                     velocity = stellar_line_velocity_kms.get(channel, 0.0) if isinstance(stellar_line_velocity_kms, dict) else stellar_line_velocity_kms
                     line_wavelengths = line_wavelengths * (1 + float(velocity) / C_KMS)
+                line_wavelengths = np.array([
+                    _observed_absorption_line_center(wavelength, norm, center) for center in line_wavelengths
+                ])
                 in_view = line_wavelengths[(line_wavelengths >= low) & (line_wavelengths <= high)]
                 if not len(in_view):
                     continue
@@ -361,6 +410,9 @@ def plot_sky_emission_spectra_ugri(
             if len(line_table):
                 line_wavelengths = line_table["Air Wavelength [A]"].values.astype(float)
                 in_view = line_wavelengths[(line_wavelengths >= low) & (line_wavelengths <= high)]
+                in_view = np.array([
+                    _observed_sky_line_center(wavelength, sky_flux, center) for center in in_view
+                ])
                 ymin, ymax = SKY_Y_LIMITS[channel]
                 marker_top = ymax - 0.04 * (ymax - ymin)
                 marker_bottom = marker_top - 0.10 * (ymax - ymin)

@@ -1,6 +1,6 @@
 # Measuring Radial Velocities with the Next Generation Palomar Spectrograph
 
-This repository serves as a tutorial for computing flexure corrections and radial velocities (RVs) with the Next Generation Palomar Spectrograph (NGPS) at Palomar Observatory. The method is calibrated using Gaia-ESO RV standard stars and will be described in detail in Nagarajan et al. (forthcoming).
+This repository serves as a tutorial for computing flexure corrections and radial velocities (RVs) with the Next Generation Palomar Spectrograph (NGPS) at Palomar Observatory. The method is calibrated using Gaia-ESO RV standard stars and is described in [Nagarajan & El-Badry (2026)](https://iopscience.iop.org/article/10.1088/1538-3873/aeae72), published in *Publications of the Astronomical Society of the Pacific*.
 
 ## How to Use
 

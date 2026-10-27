@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
+from scipy.integrate import trapezoid
 from scipy.optimize import least_squares
 
 from rv_helpers import (
@@ -41,7 +42,7 @@ def _best_telluric_anchor_window(fit_wl, tell_wl, tell_flux, channel, obs_wavele
             continue
         absorption = np.clip(1 - tell_flux[tell_m], 0, None)
         depth = np.nanmax(absorption)
-        area = np.trapz(absorption, tell_wl[tell_m])
+        area = trapezoid(absorption, tell_wl[tell_m])
         if depth >= 0.005 and area >= 0.02:
             return float(low_fit), float(high_fit)
 
@@ -60,7 +61,7 @@ def _best_telluric_anchor_window(fit_wl, tell_wl, tell_flux, channel, obs_wavele
             continue
         absorption = np.clip(1 - tell_flux[tell_m], 0, None)
         depth = np.nanmax(absorption)
-        area = np.trapz(absorption, tell_wl[tell_m])
+        area = trapezoid(absorption, tell_wl[tell_m])
         score = depth * max(area, 0)
         if np.isfinite(score) and score > best_score:
             best_score = score
@@ -118,7 +119,7 @@ def build_telluric_flexure_windows(
             continue
         absorption = np.clip(1 - tell_flux[m], 0, None)
         depth = np.nanmax(absorption)
-        area = np.trapz(absorption, tell_wl[m])
+        area = trapezoid(absorption, tell_wl[m])
         if depth >= min_telluric_depth and area >= min_telluric_area:
             rows.append(
                 {

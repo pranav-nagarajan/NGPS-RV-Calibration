@@ -341,7 +341,7 @@ def clean_cosmic_rays_lacosmic(
         from astroscrappy import detect_cosmics
     except ImportError as exc:
         raise ImportError(
-            "Cosmic-ray cleaning requires the optional 'astroscrappy' package."
+            "Cosmic-ray cleaning requires 'astroscrappy'. Install it with: python -m pip install astroscrappy"
         ) from exc
 
     image = _float_array(image)
